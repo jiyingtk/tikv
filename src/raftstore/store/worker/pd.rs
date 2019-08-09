@@ -2,7 +2,10 @@
 
 use std::cmp;
 use std::fmt::{self, Display, Formatter};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use futures::Future;
 use tokio_core::reactor::Handle;
@@ -28,8 +31,11 @@ use crate::storage::FlowStatistics;
 use pd_client::metrics::*;
 use pd_client::{Error, PdClient, RegionStat};
 use tikv_util::collections::HashMap;
+use tikv_util::metrics::ThreadInfoStatistics;
 use tikv_util::time::time_now_sec;
 use tikv_util::worker::{FutureRunnable as Runnable, FutureScheduler as Scheduler, Stopped};
+
+type RecordPairs = protobuf::RepeatedField<pdpb::RecordPair>;
 
 /// Uses an asynchronous thread to tell PD something.
 pub enum Task {
@@ -77,6 +83,11 @@ pub enum Task {
     DestroyPeer {
         region_id: u64,
     },
+    StoreInfos {
+        cpu_usages: RecordPairs,
+        read_io_rates: RecordPairs,
+        write_io_rates: RecordPairs,
+    },
 }
 
 pub struct StoreStat {
@@ -90,6 +101,10 @@ pub struct StoreStat {
     pub region_keys_read: LocalHistogram,
     pub region_bytes_written: LocalHistogram,
     pub region_keys_written: LocalHistogram,
+
+    pub store_cpu_usages: RecordPairs,
+    pub store_read_io_rates: RecordPairs,
+    pub store_write_io_rates: RecordPairs,
 }
 
 impl Default for StoreStat {
@@ -105,7 +120,25 @@ impl Default for StoreStat {
             engine_total_keys_read: 0,
             engine_last_total_bytes_read: 0,
             engine_last_total_keys_read: 0,
+
+            store_cpu_usages: RecordPairs::default(),
+            store_read_io_rates: RecordPairs::default(),
+            store_write_io_rates: RecordPairs::default(),
         }
+    }
+}
+
+impl StoreStat {
+    fn take_store_cpu_usages(&mut self) -> RecordPairs {
+        std::mem::replace(&mut self.store_cpu_usages, RecordPairs::default())
+    }
+
+    fn take_store_read_io_rates(&mut self) -> RecordPairs {
+        std::mem::replace(&mut self.store_read_io_rates, RecordPairs::default())
+    }
+
+    fn take_store_write_io_rates(&mut self) -> RecordPairs {
+        std::mem::replace(&mut self.store_write_io_rates, RecordPairs::default())
     }
 }
 
@@ -172,8 +205,78 @@ impl Display for Task {
             Task::DestroyPeer { ref region_id } => {
                 write!(f, "destroy peer of region {}", region_id)
             }
+            Task::StoreInfos {
+                ref cpu_usages,
+                ref read_io_rates,
+                ref write_io_rates,
+            } => write!(
+                f,
+                "get store's informations: cpu_usages {:?}, read_io_rates {:?}, write_io_rates {:?}",
+                cpu_usages, read_io_rates, write_io_rates,
+            ),
         }
     }
+}
+
+fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairs {
+    m.into_iter()
+        .map(|(k, v)| {
+            let mut pair = pdpb::RecordPair::new();
+            pair.set_key(k);
+            pair.set_value(v);
+            pair
+        })
+        .collect()
+}
+
+fn start_monitor_thread(interval_ms: u64, scheduler: Scheduler<Task>) -> Sender<()> {
+    let (stop_monitor_tx, stop_monitor_rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("StatsMonitor".to_owned())
+        .spawn(move || {
+            let mut thread_stats = ThreadInfoStatistics::new();
+
+            loop {
+                match stop_monitor_rx.recv_timeout(Duration::from_millis(interval_ms)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        thread_stats.record();
+
+                        let cpu_usages_map = thread_stats.get_cpu_usages();
+                        let read_io_rates_map = thread_stats.get_read_io_rates();
+                        let write_io_rates_map = thread_stats.get_write_io_rates();
+
+                        let cpu_usages = convert_record_pairs(cpu_usages_map);
+                        let read_io_rates = convert_record_pairs(read_io_rates_map);
+                        let write_io_rates = convert_record_pairs(write_io_rates_map);
+
+                        let task = Task::StoreInfos {
+                            cpu_usages,
+                            read_io_rates,
+                            write_io_rates,
+                        };
+                        if let Err(e) = scheduler.schedule(task) {
+                            error!(
+                                "failed to send store infos to pd worker";
+                                "err" => ?e,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "failed in StatsMonitor's recv_timeout";
+                            "err" => ?e
+                        );
+                        break;
+                    }
+                    Ok(_) => {
+                        break;
+                    }
+                }
+            }
+        })
+        .unwrap();
+
+    stop_monitor_tx
 }
 
 pub struct Runner<T: PdClient> {
@@ -191,6 +294,9 @@ pub struct Runner<T: PdClient> {
     // actually it is the sender connected to Runner's Worker which
     // calls Runner's run() on Task received.
     scheduler: Scheduler<Task>,
+
+    // use to stop monitor thread
+    stop_monitor_tx: Sender<()>,
 }
 
 impl<T: PdClient> Runner<T> {
@@ -201,7 +307,11 @@ impl<T: PdClient> Runner<T> {
         db: Arc<DB>,
         scheduler: Scheduler<Task>,
         region_heartbeat_interval: u64,
+        store_heartbeat_interval: u64,
     ) -> Runner<T> {
+        let stop_monitor_tx =
+            start_monitor_thread(store_heartbeat_interval * 1000, scheduler.clone());
+
         Runner {
             store_id,
             pd_client,
@@ -212,6 +322,7 @@ impl<T: PdClient> Runner<T> {
             store_stat: StoreStat::default(),
             region_heartbeat_interval,
             scheduler,
+            stop_monitor_tx,
         }
     }
 
@@ -417,6 +528,11 @@ impl<T: PdClient> Runner<T> {
         stats.set_keys_read(
             self.store_stat.engine_total_keys_read - self.store_stat.engine_last_total_keys_read,
         );
+
+        stats.set_cpu_usages(self.store_stat.take_store_cpu_usages());
+        stats.set_read_io_rates(self.store_stat.take_store_read_io_rates());
+        stats.set_write_io_rates(self.store_stat.take_store_write_io_rates());
+
         let mut interval = pdpb::TimeInterval::default();
         interval.set_start_timestamp(self.store_stat.last_report_ts);
         stats.set_interval(interval);
@@ -627,6 +743,17 @@ impl<T: PdClient> Runner<T> {
             Some(_) => info!("remove peer statistic record in pd"; "region_id" => region_id),
         }
     }
+
+    fn handle_store_infos(
+        &mut self,
+        cpu_usages: RecordPairs,
+        read_io_rates: RecordPairs,
+        write_io_rates: RecordPairs,
+    ) {
+        self.store_stat.store_cpu_usages = cpu_usages;
+        self.store_stat.store_read_io_rates = read_io_rates;
+        self.store_stat.store_write_io_rates = write_io_rates;
+    }
 }
 
 impl<T: PdClient> Runnable<Task> for Runner<T> {
@@ -736,7 +863,16 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
             } => self.handle_validate_peer(handle, region, peer, merge_source),
             Task::ReadStats { read_stats } => self.handle_read_stats(read_stats),
             Task::DestroyPeer { region_id } => self.handle_destroy_peer(region_id),
+            Task::StoreInfos {
+                cpu_usages,
+                read_io_rates,
+                write_io_rates,
+            } => self.handle_store_infos(cpu_usages, read_io_rates, write_io_rates),
         };
+    }
+
+    fn shutdown(&mut self) {
+        self.stop_monitor_tx.send(()).unwrap();
     }
 }
 
@@ -859,5 +995,73 @@ fn send_destroy_peer_message(
             "region_id" => local_region.get_id(),
             "err" => ?e
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+    use tikv_util::worker::FutureWorker;
+
+    use super::*;
+
+    struct RunnerTest {
+        store_stat: StoreStat,
+        stop_monitor_tx: Sender<()>,
+    }
+
+    impl RunnerTest {
+        fn new(scheduler: Scheduler<Task>) -> RunnerTest {
+            let stop_monitor_tx = start_monitor_thread(100, scheduler.clone());
+
+            RunnerTest {
+                store_stat: StoreStat::default(),
+                stop_monitor_tx,
+            }
+        }
+
+        fn handle_store_infos(
+            &mut self,
+            cpu_usages: RecordPairs,
+            read_io_rates: RecordPairs,
+            write_io_rates: RecordPairs,
+        ) {
+            self.store_stat.store_cpu_usages = cpu_usages;
+            self.store_stat.store_read_io_rates = read_io_rates;
+            self.store_stat.store_write_io_rates = write_io_rates;
+        }
+    }
+
+    impl Runnable<Task> for RunnerTest {
+        fn run(&mut self, task: Task, _handle: &Handle) {
+            if let Task::StoreInfos {
+                cpu_usages,
+                read_io_rates,
+                write_io_rates,
+            } = task
+            {
+                self.handle_store_infos(cpu_usages, read_io_rates, write_io_rates)
+            };
+        }
+
+        fn shutdown(&mut self) {
+            self.stop_monitor_tx.send(()).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_simulate_upload_infos() {
+        let mut pd_worker = FutureWorker::new("test-pd-worker");
+        let runner = RunnerTest::new(pd_worker.scheduler());
+        pd_worker.start(runner).unwrap();
+
+        let start = Instant::now();
+        loop {
+            if (Instant::now() - start).as_millis() > 400 {
+                break;
+            }
+        }
+
+        pd_worker.stop();
     }
 }

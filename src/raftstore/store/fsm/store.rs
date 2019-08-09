@@ -1103,6 +1103,7 @@ impl RaftBatchSystem {
             Arc::clone(&engines.kv),
             workers.pd_worker.scheduler(),
             cfg.pd_heartbeat_tick_interval.as_secs(),
+            cfg.pd_store_heartbeat_tick_interval.as_secs(),
         );
         box_try!(workers.pd_worker.start(pd_runner));
 
