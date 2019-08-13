@@ -2,9 +2,10 @@
 
 use std::cmp;
 use std::fmt::{self, Display, Formatter};
+use std::io;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
 
 use futures::Future;
@@ -218,6 +219,7 @@ impl Display for Task {
     }
 }
 
+#[inline]
 fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairs {
     m.into_iter()
         .map(|(k, v)| {
@@ -229,54 +231,69 @@ fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairs {
         .collect()
 }
 
-fn start_monitor_thread(interval_ms: u64, scheduler: Scheduler<Task>) -> Sender<()> {
-    let (stop_monitor_tx, stop_monitor_rx) = mpsc::channel();
-    thread::Builder::new()
-        .name("StatsMonitor".to_owned())
-        .spawn(move || {
-            let mut thread_stats = ThreadInfoStatistics::new();
+struct StatsMonitor {
+    scheduler: Scheduler<Task>,
+    handle: Option<JoinHandle<()>>,
+    sender: Option<Sender<bool>>,
+    interval: Duration,
+}
 
-            loop {
-                match stop_monitor_rx.recv_timeout(Duration::from_millis(interval_ms)) {
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        thread_stats.record();
+impl StatsMonitor {
+    pub fn new(interval: u64, scheduler: Scheduler<Task>) -> Self {
+        StatsMonitor {
+            scheduler,
+            handle: None,
+            sender: None,
+            interval: Duration::from_secs(interval),
+        }
+    }
 
-                        let cpu_usages_map = thread_stats.get_cpu_usages();
-                        let read_io_rates_map = thread_stats.get_read_io_rates();
-                        let write_io_rates_map = thread_stats.get_write_io_rates();
+    pub fn start(&mut self) -> Result<(), io::Error> {
+        let (tx, rx) = mpsc::channel();
+        let interval = self.interval;
+        let scheduler = self.scheduler.clone();
+        self.sender = Some(tx);
+        let h = Builder::new()
+            .name("stats-monitor".to_owned())
+            .spawn(move || {
+                let mut thread_stats = ThreadInfoStatistics::new();
 
-                        let cpu_usages = convert_record_pairs(cpu_usages_map);
-                        let read_io_rates = convert_record_pairs(read_io_rates_map);
-                        let write_io_rates = convert_record_pairs(write_io_rates_map);
+                while let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(interval) {
+                    thread_stats.record();
 
-                        let task = Task::StoreInfos {
-                            cpu_usages,
-                            read_io_rates,
-                            write_io_rates,
-                        };
-                        if let Err(e) = scheduler.schedule(task) {
-                            error!(
-                                "failed to send store infos to pd worker";
-                                "err" => ?e,
-                            );
-                        }
-                    }
-                    Err(e) => {
+                    let cpu_usages = convert_record_pairs(thread_stats.get_cpu_usages());
+                    let read_io_rates = convert_record_pairs(thread_stats.get_read_io_rates());
+                    let write_io_rates = convert_record_pairs(thread_stats.get_write_io_rates());
+
+                    let task = Task::StoreInfos {
+                        cpu_usages,
+                        read_io_rates,
+                        write_io_rates,
+                    };
+                    if let Err(e) = scheduler.schedule(task) {
                         error!(
-                            "failed in StatsMonitor's recv_timeout";
-                            "err" => ?e
+                            "failed to send store infos to pd worker";
+                            "err" => ?e,
                         );
-                        break;
-                    }
-                    Ok(_) => {
-                        break;
                     }
                 }
-            }
-        })
-        .unwrap();
+            })?;
 
-    stop_monitor_tx
+        self.handle = Some(h);
+        Ok(())
+    }
+
+    pub fn stop(&mut self) {
+        let h = self.handle.take();
+        if h.is_none() {
+            return;
+        }
+        drop(self.sender.take().unwrap());
+        if let Err(e) = h.unwrap().join() {
+            error!("join stats monitor failed"; "err" => ?e);
+            return;
+        }
+    }
 }
 
 pub struct Runner<T: PdClient> {
@@ -294,9 +311,7 @@ pub struct Runner<T: PdClient> {
     // actually it is the sender connected to Runner's Worker which
     // calls Runner's run() on Task received.
     scheduler: Scheduler<Task>,
-
-    // use to stop monitor thread
-    stop_monitor_tx: Sender<()>,
+    stats_montor: StatsMonitor,
 }
 
 impl<T: PdClient> Runner<T> {
@@ -309,8 +324,10 @@ impl<T: PdClient> Runner<T> {
         region_heartbeat_interval: u64,
         store_heartbeat_interval: u64,
     ) -> Runner<T> {
-        let stop_monitor_tx =
-            start_monitor_thread(store_heartbeat_interval * 1000, scheduler.clone());
+        let mut stats_montor = StatsMonitor::new(store_heartbeat_interval, scheduler.clone());
+        if let Err(e) = stats_montor.start() {
+            error!("failed to start stats monitor, error = {:?}", e);
+        }
 
         Runner {
             store_id,
@@ -322,7 +339,7 @@ impl<T: PdClient> Runner<T> {
             store_stat: StoreStat::default(),
             region_heartbeat_interval,
             scheduler,
-            stop_monitor_tx,
+            stats_montor,
         }
     }
 
@@ -872,7 +889,7 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
     }
 
     fn shutdown(&mut self) {
-        self.stop_monitor_tx.send(()).unwrap();
+        self.stats_montor.stop();
     }
 }
 
@@ -1000,23 +1017,31 @@ fn send_destroy_peer_message(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::time::Instant;
     use tikv_util::worker::FutureWorker;
 
     use super::*;
 
     struct RunnerTest {
-        store_stat: StoreStat,
-        stop_monitor_tx: Sender<()>,
+        store_stat: Arc<Mutex<StoreStat>>,
+        stats_montor: StatsMonitor,
     }
 
     impl RunnerTest {
-        fn new(scheduler: Scheduler<Task>) -> RunnerTest {
-            let stop_monitor_tx = start_monitor_thread(100, scheduler.clone());
+        fn new(
+            interval: u64,
+            scheduler: Scheduler<Task>,
+            store_stat: Arc<Mutex<StoreStat>>,
+        ) -> RunnerTest {
+            let mut stats_montor = StatsMonitor::new(interval, scheduler.clone());
+            if let Err(e) = stats_montor.start() {
+                error!("failed to start stats monitor, error = {:?}", e);
+            }
 
             RunnerTest {
-                store_stat: StoreStat::default(),
-                stop_monitor_tx,
+                store_stat,
+                stats_montor,
             }
         }
 
@@ -1026,9 +1051,10 @@ mod tests {
             read_io_rates: RecordPairs,
             write_io_rates: RecordPairs,
         ) {
-            self.store_stat.store_cpu_usages = cpu_usages;
-            self.store_stat.store_read_io_rates = read_io_rates;
-            self.store_stat.store_write_io_rates = write_io_rates;
+            let mut store_stat = self.store_stat.lock().unwrap();
+            store_stat.store_cpu_usages = cpu_usages;
+            store_stat.store_read_io_rates = read_io_rates;
+            store_stat.store_write_io_rates = write_io_rates;
         }
     }
 
@@ -1045,22 +1071,34 @@ mod tests {
         }
 
         fn shutdown(&mut self) {
-            self.stop_monitor_tx.send(()).unwrap();
+            self.stats_montor.stop();
         }
     }
 
+    fn sum_record_pairs(pairs: &RecordPairs) -> u64 {
+        let mut sum = 0;
+        for record in pairs.into_iter() {
+            sum += record.get_value();
+        }
+        sum
+    }
+
     #[test]
-    fn test_simulate_upload_infos() {
+    fn test_collect_stats() {
         let mut pd_worker = FutureWorker::new("test-pd-worker");
-        let runner = RunnerTest::new(pd_worker.scheduler());
+        let store_stat = Arc::new(Mutex::new(StoreStat::default()));
+        let runner = RunnerTest::new(1, pd_worker.scheduler(), Arc::clone(&store_stat));
         pd_worker.start(runner).unwrap();
 
         let start = Instant::now();
         loop {
-            if (Instant::now() - start).as_millis() > 400 {
+            if (Instant::now() - start).as_secs() > 2 {
                 break;
             }
         }
+
+        let total_cpu_usages = sum_record_pairs(&store_stat.lock().unwrap().store_cpu_usages);
+        assert!(total_cpu_usages > 90);
 
         pd_worker.stop();
     }
