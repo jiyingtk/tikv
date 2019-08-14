@@ -6,7 +6,7 @@ use engine::rocks::CompactionJobInfo;
 use engine::{WriteBatch, WriteOptions, DB};
 use engine::{CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
 use futures::Future;
-use kvproto::import_sstpb::SSTMeta;
+use kvproto::import_sstpb::SstMeta;
 use kvproto::metapb::{self, Region, RegionEpoch};
 use kvproto::pdpb::StoreStats;
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest};
@@ -1102,7 +1102,6 @@ impl RaftBatchSystem {
             self.router.clone(),
             Arc::clone(&engines.kv),
             workers.pd_worker.scheduler(),
-            cfg.pd_heartbeat_tick_interval.as_secs(),
             cfg.pd_store_heartbeat_tick_interval.as_secs(),
         );
         box_try!(workers.pd_worker.start(pd_runner));
@@ -1759,7 +1758,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 }
 
 impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
-    fn on_validate_sst_result(&mut self, ssts: Vec<SSTMeta>) {
+    fn on_validate_sst_result(&mut self, ssts: Vec<SstMeta>) {
         if ssts.is_empty() {
             return;
         }
