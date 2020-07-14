@@ -878,23 +878,22 @@ where
                         }
                     };
 
-                    if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
-                        let mut split_maps = ratio_split_maps.lock().unwrap();
-                        if !split_maps.contains_key(&region_id) {
-                            let opts = split_region.get_opts();
-                            let split_info = RatioSplitInfo {
-                                dim_id: opts[0] as u64,
-                                ratio: opts[1],
-                            };
-                            split_maps.insert(region_id, split_info);
-                            info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
-                        }
-                    } else {
+                    // if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
+                    //     let mut split_maps = ratio_split_maps.lock().unwrap();
+                    //     if !split_maps.contains_key(&region_id) {
+                    //         let opts = split_region.get_opts();
+                    //         let split_info = RatioSplitInfo {
+                    //             dim_id: opts[0] as u64,
+                    //             ratio: opts[1],
+                    //         };
+                    //         split_maps.insert(region_id, split_info);
+                    //         info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
+                    //     }
+                    // } else {
                         if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
                             error!("send halfsplit request failed"; "region_id" => region_id, "err" => ?e);
                         }
-                    }
-
+                    // }
                 } else if resp.has_merge() {
                     PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["merge"]).inc();
 
