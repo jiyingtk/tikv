@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
+    Mutex,
 };
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
@@ -27,7 +28,7 @@ use crate::store::cmd_resp::new_error;
 use crate::store::metrics::*;
 use crate::store::util::is_epoch_stale;
 use crate::store::util::KeysInfoFormatter;
-use crate::store::worker::split_controller::{SplitInfo, TOP_N};
+use crate::store::worker::split_controller::{RatioSplitInfo, SplitInfo, TOP_N};
 use crate::store::worker::{AutoSplitController, ReadStats};
 use crate::store::Callback;
 use crate::store::StoreInfo;
@@ -294,13 +295,16 @@ where
     thread_info_interval: Duration,
     qps_info_interval: Duration,
     collect_interval: Duration,
+
+    ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
 }
 
 impl<E> StatsMonitor<E>
 where
     E: KvEngine,
 {
-    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>) -> Self {
+    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>, ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
+    ) -> Self {
         StatsMonitor {
             scheduler,
             handle: None,
@@ -309,6 +313,7 @@ where
             thread_info_interval: interval,
             qps_info_interval: cmp::min(DEFAULT_QPS_INFO_INTERVAL, interval),
             collect_interval: cmp::min(DEFAULT_COLLECT_INTERVAL, interval),
+            ratio_split_maps,
         }
     }
 
@@ -342,6 +347,8 @@ where
 
         let scheduler = self.scheduler.clone();
 
+        let ratio_split_maps = self.ratio_split_maps.clone();
+
         let h = Builder::new()
             .name(thd_name!("stats-monitor"))
             .spawn(move || {
@@ -372,6 +379,12 @@ where
                         while let Ok(other) = receiver.try_recv() {
                             others.push(other);
                         }
+
+                        let split_maps = ratio_split_maps.lock().unwrap();
+                        for (rid, _) in &*split_maps {
+                            info!("needed splitted_region_id"; "id" => rid);
+                        }
+
                         let (top, split_infos) = auto_split_controller.flush(others);
                         auto_split_controller.clear();
                         let task = Task::AutoSplit { split_infos };
@@ -439,6 +452,7 @@ where
     // calls Runner's run() on Task received.
     scheduler: Scheduler<Task<EK>>,
     stats_monitor: StatsMonitor<EK>,
+    ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
 
     concurrency_manager: ConcurrencyManager,
 }
@@ -458,11 +472,13 @@ where
         db: EK,
         scheduler: Scheduler<Task<EK>>,
         store_heartbeat_interval: Duration,
-        auto_split_controller: AutoSplitController,
+        mut auto_split_controller: AutoSplitController,
         concurrency_manager: ConcurrencyManager,
     ) -> Runner<EK, ER, T> {
         let interval = store_heartbeat_interval / Self::INTERVAL_DIVISOR;
-        let mut stats_monitor = StatsMonitor::new(interval, scheduler.clone());
+        let ratio_split_maps = Arc::new(Mutex::new(HashMap::default()));
+        let mut stats_monitor = StatsMonitor::new(interval, scheduler.clone(), ratio_split_maps.clone());
+        auto_split_controller.ratio_split_maps = ratio_split_maps.clone();
         if let Err(e) = stats_monitor.start(auto_split_controller) {
             error!("failed to start stats collector, error = {:?}", e);
         }
@@ -478,6 +494,7 @@ where
             start_ts: UnixSecs::now(),
             scheduler,
             stats_monitor,
+            ratio_split_maps,
             concurrency_manager,
         }
     }
@@ -808,6 +825,7 @@ where
     fn schedule_heartbeat_receiver(&mut self) {
         let router = self.router.clone();
         let store_id = self.store_id;
+        let ratio_split_maps = self.ratio_split_maps.clone();
 
         let fut = self.pd_client
             .handle_region_heartbeat_response(self.store_id, move |mut resp| {
@@ -865,9 +883,24 @@ where
                             policy: split_region.get_policy(),
                         }
                     };
-                    if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
-                        error!("send halfsplit request failed"; "region_id" => region_id, "err" => ?e);
+
+                    if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
+                        let mut split_maps = ratio_split_maps.lock().unwrap();
+                        if !split_maps.contains_key(&region_id) {
+                            let opts = split_region.get_opts();
+                            let split_info = RatioSplitInfo {
+                                dim_id: opts[0] as u64,
+                                ratio: opts[1],
+                            };
+                            split_maps.insert(region_id, split_info);
+                            info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
+                        }
+                    } else {
+                        if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
+                            error!("send halfsplit request failed"; "region_id" => region_id, "err" => ?e);
+                        }
                     }
+
                 } else if resp.has_merge() {
                     PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["merge"]).inc();
 
@@ -895,16 +928,33 @@ where
     }
 
     fn handle_read_stats(&mut self, read_stats: ReadStats) {
+        let split_maps = self.ratio_split_maps.lock().unwrap();
+
         for (region_id, stats) in &read_stats.flows {
             let peer_stat = self
                 .region_peers
                 .entry(*region_id)
                 .or_insert_with(PeerStat::default);
             peer_stat.read_bytes += stats.read_bytes as u64;
-            peer_stat.read_keys += stats.read_keys as u64;
+            // peer_stat.read_keys += stats.read_keys as u64;
             self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
-            self.store_stat.engine_total_keys_read += stats.read_keys as u64;
+            // self.store_stat.engine_total_keys_read += stats.read_keys as u64;
+
+            if split_maps.contains_key(region_id) {
+                if let Some(region_info) = read_stats.region_infos.get(region_id) {
+                    info!("[D] recv read_stats"; "ratio_splitted_region_id" => region_id, "read_bytes" => stats.read_bytes, "read_keys" => stats.read_keys, "kr_len" => region_info.key_ranges.len());
+                }
+            }
         }
+        for (region_id, region_info) in &read_stats.region_infos {
+            let peer_stat = self
+                .region_peers
+                .entry(*region_id)
+                .or_insert_with(PeerStat::default);
+            peer_stat.read_keys += region_info.qps as u64;
+            self.store_stat.engine_total_keys_read += region_info.qps as u64;
+        }
+
         if !read_stats.region_infos.is_empty() {
             if let Some(sender) = self.stats_monitor.get_sender() {
                 if sender.send(read_stats).is_err() {
