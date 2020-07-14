@@ -239,6 +239,7 @@ impl<S: CasualRouter<RocksSnapshot>> Runner<S> {
                     }
                 }
             },
+            CheckPolicy::Ratio => vec![],  // Handled by pd worker directly.
             CheckPolicy::Usekey => vec![], // Handled by pd worker directly.
         };
 

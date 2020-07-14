@@ -3,6 +3,8 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::slice::Iter;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use kvproto::kvrpcpb::KeyRange;
@@ -19,6 +21,12 @@ use crate::store::worker::split_config::DEFAULT_SAMPLE_NUM;
 use crate::store::worker::{FlowStatistics, SplitConfig, SplitConfigManager};
 
 pub const TOP_N: usize = 10;
+
+pub struct RatioSplitInfo
+{
+    pub dim_id: u64,
+    pub ratio: f64,
+}
 
 pub struct SplitInfo {
     pub region_id: u64,
@@ -300,6 +308,7 @@ pub struct AutoSplitController {
     pub recorders: HashMap<u64, Recorder>,
     cfg: SplitConfig,
     cfg_tracker: Tracker<SplitConfig>,
+    pub ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
 }
 
 impl AutoSplitController {
@@ -308,6 +317,7 @@ impl AutoSplitController {
             recorders: HashMap::default(),
             cfg: config_manager.value().clone(),
             cfg_tracker: config_manager.0.clone().tracker("split_hub".to_owned()),
+            ratio_split_maps: Arc::new(Mutex::new(HashMap::default())),
         }
     }
 
@@ -324,6 +334,15 @@ impl AutoSplitController {
         let capacity = others.len();
         for other in others {
             for (region_id, region_info) in other.region_infos {
+                // if self.ratio_split_maps.contains_key(&region_id) {
+                //     for kr in &region_info.key_ranges {
+                //         let sk = Key::from_raw(&kr.start_key);
+                //         let ek = Key::from_raw(&kr.end_key);
+                //         let is_range = sk != ek;
+                //         info!("key ranges"; "start_key" => format!("{}", sk), "end_key" => format!("{}", ek), "is_range" => is_range);
+                //     }
+                //     info!("in auto split, collect thread region_info"; "region_id" => region_id, "kr_len" => region_info.key_ranges.len(), "sample_num" => self.cfg.sample_num);
+                // }
                 if region_info.key_ranges.len() >= self.cfg.sample_num {
                     let region_infos = region_infos_map
                         .entry(region_id)
@@ -333,12 +352,14 @@ impl AutoSplitController {
             }
         }
 
+        let mut split_maps = self.ratio_split_maps.lock().unwrap();
         for (region_id, region_infos) in region_infos_map {
             let pre_sum = prefix_sum(region_infos.iter(), RegionInfo::get_qps);
 
             let qps = *pre_sum.last().unwrap(); // region_infos is not empty
             let num = self.cfg.detect_times;
-            if qps > self.cfg.qps_threshold {
+            if split_maps.contains_key(&region_id) {
+            // if qps > self.cfg.qps_threshold {
                 let recorder = self
                     .recorders
                     .entry(region_id)
@@ -353,7 +374,12 @@ impl AutoSplitController {
                     RegionInfo::get_key_ranges_mut,
                 );
 
+                let kr_len = key_ranges.len();
+
                 recorder.record(key_ranges);
+
+                info!("in auto split"; "region_id" => region_id, "is_ready" => recorder.is_ready(), "kr_len" => kr_len,);
+
                 if recorder.is_ready() {
                     let key = recorder.collect(&self.cfg);
                     if !key.is_empty() {
@@ -363,7 +389,10 @@ impl AutoSplitController {
                             peer: recorder.peer.clone(),
                         };
                         split_infos.push(split_info);
+                        split_maps.remove(&region_id);
                         info!("load base split region";"region_id"=>region_id);
+                    } else {
+                        info!("load base split, failed in collect";"region_id"=>region_id);
                     }
                     self.recorders.remove(&region_id);
                 }
