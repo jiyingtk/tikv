@@ -365,9 +365,11 @@ where
                             others.push(other);
                         }
 
-                        let split_maps = ratio_split_maps.lock().unwrap();
-                        for (rid, _) in &*split_maps {
-                            info!("needed splitted_region_id"; "id" => rid);
+                        {
+                            let split_maps = ratio_split_maps.lock().unwrap();
+                            for (rid, _) in &*split_maps {
+                                info!("needed splitted_region_id"; "id" => rid);
+                            }
                         }
 
                         let (top, split_infos) = auto_split_controller.flush(others);
@@ -864,7 +866,7 @@ where
                         .inc();
 
                     let mut split_region = resp.take_split_region();
-                    info!("try to split"; "region_id" => region_id, "region_epoch" => ?epoch);
+                    info!("try to split"; "region_id" => region_id, "region_epoch" => ?epoch, "policy" => ?split_region.get_policy());
                     let msg = if split_region.get_policy() == pdpb::CheckPolicy::Usekey {
                         CasualMessage::SplitRegion {
                             region_epoch: epoch,
@@ -878,22 +880,23 @@ where
                         }
                     };
 
-                    // if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
-                    //     let mut split_maps = ratio_split_maps.lock().unwrap();
-                    //     if !split_maps.contains_key(&region_id) {
-                    //         let opts = split_region.get_opts();
-                    //         let split_info = RatioSplitInfo {
-                    //             dim_id: opts[0] as u64,
-                    //             ratio: opts[1],
-                    //         };
-                    //         split_maps.insert(region_id, split_info);
-                    //         info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
-                    //     }
-                    // } else {
+                    if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
+                        info!("receive ratio split request"; "region_id" => region_id);
+                        let mut split_maps = ratio_split_maps.lock().unwrap();
+                        if !split_maps.contains_key(&region_id) {
+                            let opts = split_region.get_opts();
+                            let split_info = RatioSplitInfo {
+                                dim_id: opts[0] as u64,
+                                ratio: opts[1],
+                            };
+                            split_maps.insert(region_id, split_info);
+                            info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
+                        }
+                    } else {
                         if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
                             error!("send halfsplit request failed"; "region_id" => region_id, "err" => ?e);
                         }
-                    // }
+                    }
                 } else if resp.has_merge() {
                     PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["merge"]).inc();
 
@@ -917,8 +920,6 @@ where
     }
 
     fn handle_read_stats(&mut self, read_stats: ReadStats) {
-        let split_maps = self.ratio_split_maps.lock().unwrap();
-
         for (region_id, stats) in &read_stats.flows {
             let peer_stat = self
                 .region_peers
@@ -928,12 +929,6 @@ where
             // peer_stat.read_keys += stats.read_keys as u64;
             self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
             // self.store_stat.engine_total_keys_read += stats.read_keys as u64;
-
-            if split_maps.contains_key(region_id) {
-                if let Some(region_info) = read_stats.region_infos.get(region_id) {
-                    info!("[D] recv read_stats"; "ratio_splitted_region_id" => region_id, "read_bytes" => stats.read_bytes, "read_keys" => stats.read_keys, "kr_len" => region_info.key_ranges.len());
-                }
-            }
         }
         for (region_id, region_info) in &read_stats.region_infos {
             let peer_stat = self
@@ -1234,6 +1229,7 @@ fn send_destroy_peer_message(
 #[cfg(test)]
 mod tests {
     use engine_rocks::RocksEngine;
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Instant;
     use tikv_util::worker::FutureWorker;
@@ -1251,7 +1247,7 @@ mod tests {
             scheduler: Scheduler<Task<RocksEngine>>,
             store_stat: Arc<Mutex<StoreStat>>,
         ) -> RunnerTest {
-            let mut stats_monitor = StatsMonitor::new(Duration::from_secs(interval), scheduler);
+            let mut stats_monitor = StatsMonitor::new(Duration::from_secs(interval), scheduler, Arc::new(Mutex::new(HashMap::default())));
 
             if let Err(e) = stats_monitor.start(AutoSplitController::default()) {
                 error!("failed to start stats collector, error = {:?}", e);

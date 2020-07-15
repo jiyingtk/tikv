@@ -292,10 +292,11 @@ pub fn new_pd_change_peer(
     resp
 }
 
-pub fn new_split_region(policy: CheckPolicy, keys: Vec<Vec<u8>>) -> RegionHeartbeatResponse {
+pub fn new_split_region(policy: CheckPolicy, keys: Vec<Vec<u8>>, opts: Vec<f64>) -> RegionHeartbeatResponse {
     let mut split_region = SplitRegion::default();
     split_region.set_policy(policy);
     split_region.set_keys(keys.into());
+    split_region.set_opts(opts.into());
     let mut resp = RegionHeartbeatResponse::default();
     resp.set_split_region(split_region);
     resp

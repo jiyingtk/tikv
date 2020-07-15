@@ -328,22 +328,14 @@ impl AutoSplitController {
     pub fn flush(&mut self, others: Vec<ReadStats>) -> (Vec<usize>, Vec<SplitInfo>) {
         let mut split_infos = Vec::default();
         let mut top = BinaryHeap::with_capacity(TOP_N as usize);
+        let mut split_maps = self.ratio_split_maps.lock().unwrap();
 
         // collect from different thread
         let mut region_infos_map = HashMap::default(); // regionID-regionInfos
         let capacity = others.len();
         for other in others {
             for (region_id, region_info) in other.region_infos {
-                // if self.ratio_split_maps.contains_key(&region_id) {
-                //     for kr in &region_info.key_ranges {
-                //         let sk = Key::from_raw(&kr.start_key);
-                //         let ek = Key::from_raw(&kr.end_key);
-                //         let is_range = sk != ek;
-                //         info!("key ranges"; "start_key" => format!("{}", sk), "end_key" => format!("{}", ek), "is_range" => is_range);
-                //     }
-                //     info!("in auto split, collect thread region_info"; "region_id" => region_id, "kr_len" => region_info.key_ranges.len(), "sample_num" => self.cfg.sample_num);
-                // }
-                if region_info.key_ranges.len() >= self.cfg.sample_num {
+                if split_maps.contains_key(&region_id) || region_info.key_ranges.len() >= self.cfg.sample_num {
                     let region_infos = region_infos_map
                         .entry(region_id)
                         .or_insert_with(|| Vec::with_capacity(capacity));
@@ -352,7 +344,6 @@ impl AutoSplitController {
             }
         }
 
-        let mut split_maps = self.ratio_split_maps.lock().unwrap();
         for (region_id, region_infos) in region_infos_map {
             let pre_sum = prefix_sum(region_infos.iter(), RegionInfo::get_qps);
 
