@@ -767,7 +767,7 @@ fn test_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     let max_key = put_till_size(cluster, 9 * item_len, &mut range);
     let target = pd_client.get_region(&max_key).unwrap();
     assert_eq!(region, target);
-    pd_client.must_split_region(target, pdpb::CheckPolicy::Scan, vec![]);
+    pd_client.must_split_region(target, pdpb::CheckPolicy::Scan, vec![], vec![]);
 
     let left = pd_client.get_region(b"").unwrap();
     let right = pd_client.get_region(&max_key).unwrap();
@@ -780,7 +780,7 @@ fn test_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     pd_client.must_split_region(
         region,
         pdpb::CheckPolicy::Usekey,
-        vec![b"x1".to_vec(), b"y2".to_vec()],
+        vec![b"x1".to_vec(), b"y2".to_vec()], vec![],
     );
     let x1 = pd_client.get_region(b"x1").unwrap();
     assert_eq!(x1.get_start_key(), b"x1");
@@ -788,6 +788,36 @@ fn test_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     let y2 = pd_client.get_region(b"y2").unwrap();
     assert_eq!(y2.get_start_key(), b"y2");
     assert_eq!(y2.get_end_key(), b"");
+}
+
+#[test]
+fn test_server_ratio_split_region() {
+    let count = 5;
+    let mut cluster = new_server_cluster(0, count);
+    test_ratio_split_region(&mut cluster);
+}
+
+fn test_ratio_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
+    // length of each key+value
+    let item_len = 74;
+    // make bucket's size to item_len, which means one row one bucket
+    cluster.cfg.coprocessor.region_max_size = ReadableSize(item_len) * 1024;
+    let mut range = 1..;
+    cluster.run();
+    let pd_client = Arc::clone(&cluster.pd_client);
+    let region = pd_client.get_region(b"").unwrap();
+    let mid_key = put_till_size(cluster, 11 * item_len, &mut range);
+    let max_key = put_till_size(cluster, 9 * item_len, &mut range);
+    let target = pd_client.get_region(&max_key).unwrap();
+    assert_eq!(region, target);
+    pd_client.must_split_region(target, pdpb::CheckPolicy::Ratio, vec![], vec![0.0, 0.5]);
+
+    let left = pd_client.get_region(b"").unwrap();
+    let right = pd_client.get_region(&max_key).unwrap();
+    assert_eq!(region.get_start_key(), left.get_start_key());
+    // assert_eq!(mid_key.as_slice(), right.get_start_key());
+    assert_eq!(right.get_start_key(), left.get_end_key());
+    assert_eq!(region.get_end_key(), right.get_end_key());
 }
 
 #[test]

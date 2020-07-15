@@ -105,6 +105,7 @@ enum Operator {
         region_epoch: metapb::RegionEpoch,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
+        opts: Vec<f64>,
     },
 }
 
@@ -157,8 +158,8 @@ impl Operator {
                 }
             }
             Operator::SplitRegion {
-                policy, ref keys, ..
-            } => new_split_region(policy, keys.clone()),
+                policy, ref keys, ref opts, ..
+            } => new_split_region(policy, keys.clone(), opts.clone()),
         }
     }
 
@@ -804,11 +805,13 @@ impl TestPdClient {
         mut region: metapb::Region,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
+        opts: Vec<f64>,
     ) {
         let op = Operator::SplitRegion {
             region_epoch: region.take_region_epoch(),
             policy,
             keys,
+            opts,
         };
         self.schedule_operator(region.get_id(), op);
     }
@@ -818,6 +821,7 @@ impl TestPdClient {
         region: metapb::Region,
         policy: pdpb::CheckPolicy,
         keys: Vec<Vec<u8>>,
+        opts: Vec<f64>,
     ) {
         let expect_region_count = self.get_regions_number()
             + if policy == pdpb::CheckPolicy::Usekey {
@@ -825,7 +829,7 @@ impl TestPdClient {
             } else {
                 1
             };
-        self.split_region(region.clone(), policy, keys);
+        self.split_region(region.clone(), policy, keys, opts);
         for _ in 1..500 {
             sleep_ms(10);
             if self.get_regions_number() == expect_region_count {
