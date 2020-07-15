@@ -365,14 +365,7 @@ where
                             others.push(other);
                         }
 
-                        {
-                            let split_maps = ratio_split_maps.lock().unwrap();
-                            for (rid, _) in &*split_maps {
-                                info!("needed splitted_region_id"; "id" => rid);
-                            }
-                        }
-
-                        let (top, split_infos) = auto_split_controller.flush(others);
+                        let (top, split_infos) = auto_split_controller.process_ratio_split(others);
                         auto_split_controller.clear();
                         let task = Task::AutoSplit { split_infos };
                         if let Err(e) = scheduler.schedule(task) {

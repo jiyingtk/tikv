@@ -22,6 +22,7 @@ use crate::store::worker::{FlowStatistics, SplitConfig, SplitConfigManager};
 
 pub const TOP_N: usize = 10;
 
+#[derive(Default)]
 pub struct RatioSplitInfo
 {
     pub dim_id: u64,
@@ -200,6 +201,30 @@ impl Recorder {
         )
     }
 
+    fn ratio_split(&mut self, _config: &SplitConfig, ratio_split_info: &RatioSplitInfo) -> Vec<u8> {
+        let mut key_ranges = vec![];
+        for key_ranges_part in &mut self.key_ranges {
+            key_ranges.append(key_ranges_part);
+        }
+
+        key_ranges.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+
+        let sum = key_ranges.len() as f64;
+        let target = ratio_split_info.ratio * sum;
+        let mut current = 0.0;
+        let mut target_key: Vec<u8> = vec![];
+        for key_range in &key_ranges {
+            current += 1.0;
+            if current >= target {
+                target_key = key_range.start_key.clone();
+                break;
+            }
+        }
+        info!("ratio split region"; "sum" => sum, "target" => target, "current" => current, "split_key" => format!("{:?}", &target_key));
+
+        target_key
+    }
+
     fn sample(samples: &mut Vec<Sample>, key_range: &KeyRange) {
         for mut sample in samples.iter_mut() {
             let order_start = if key_range.start_key.is_empty() {
@@ -328,14 +353,13 @@ impl AutoSplitController {
     pub fn flush(&mut self, others: Vec<ReadStats>) -> (Vec<usize>, Vec<SplitInfo>) {
         let mut split_infos = Vec::default();
         let mut top = BinaryHeap::with_capacity(TOP_N as usize);
-        let mut split_maps = self.ratio_split_maps.lock().unwrap();
 
         // collect from different thread
         let mut region_infos_map = HashMap::default(); // regionID-regionInfos
         let capacity = others.len();
         for other in others {
             for (region_id, region_info) in other.region_infos {
-                if split_maps.contains_key(&region_id) || region_info.key_ranges.len() >= self.cfg.sample_num {
+                if region_info.key_ranges.len() >= self.cfg.sample_num {
                     let region_infos = region_infos_map
                         .entry(region_id)
                         .or_insert_with(|| Vec::with_capacity(capacity));
@@ -349,8 +373,7 @@ impl AutoSplitController {
 
             let qps = *pre_sum.last().unwrap(); // region_infos is not empty
             let num = self.cfg.detect_times;
-            if split_maps.contains_key(&region_id) {
-            // if qps > self.cfg.qps_threshold {
+            if qps > self.cfg.qps_threshold {
                 let recorder = self
                     .recorders
                     .entry(region_id)
@@ -365,14 +388,72 @@ impl AutoSplitController {
                     RegionInfo::get_key_ranges_mut,
                 );
 
-                let kr_len = key_ranges.len();
+                recorder.record(key_ranges);
+                if recorder.is_ready() {
+                    let key = recorder.collect(&self.cfg);
+                    if !key.is_empty() {
+                        let split_info = SplitInfo {
+                            region_id,
+                            split_key: Key::from_raw(&key).into_encoded(),
+                            peer: recorder.peer.clone(),
+                        };
+                        split_infos.push(split_info);
+                        info!("load base split region";"region_id"=>region_id);
+                    }
+                    self.recorders.remove(&region_id);
+                }
+            } else {
+                self.recorders.remove_entry(&region_id);
+            }
+            top.push(qps);
+        }
+
+        (top.into_vec(), split_infos)
+    }
+
+    pub fn process_ratio_split(&mut self, others: Vec<ReadStats>) -> (Vec<usize>, Vec<SplitInfo>) {
+        let mut split_infos = Vec::default();
+        let mut top = BinaryHeap::with_capacity(TOP_N as usize);
+        let mut split_maps = self.ratio_split_maps.lock().unwrap();
+
+        // collect from different thread
+        let mut region_infos_map = HashMap::default(); // regionID-regionInfos
+        let capacity = others.len();
+        for other in others {
+            for (region_id, region_info) in other.region_infos {
+                if split_maps.contains_key(&region_id) {
+                    let region_infos = region_infos_map
+                        .entry(region_id)
+                        .or_insert_with(|| Vec::with_capacity(capacity));
+                    region_infos.push(region_info);
+                }
+            }
+        }
+
+        for (region_id, region_infos) in region_infos_map {
+            let pre_sum = prefix_sum(region_infos.iter(), RegionInfo::get_qps);
+
+            let qps = *pre_sum.last().unwrap(); // region_infos is not empty
+            let num = self.cfg.detect_times;
+            if split_maps.contains_key(&region_id) {
+                let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::default());
+
+                let recorder = self
+                    .recorders
+                    .entry(region_id)
+                    .or_insert_with(|| Recorder::new(num));
+
+                recorder.update_peer(&region_infos[0].peer);
+
+                let mut key_ranges = vec![];
+                for mut region_info in region_infos {
+                    key_ranges.append(region_info.get_key_ranges_mut());
+                }
 
                 recorder.record(key_ranges);
 
-                info!("in auto split"; "region_id" => region_id, "is_ready" => recorder.is_ready(), "kr_len" => kr_len,);
-
                 if recorder.is_ready() {
-                    let key = recorder.collect(&self.cfg);
+                    let key = recorder.ratio_split(&self.cfg, ratio_split_info);
                     if !key.is_empty() {
                         let split_info = SplitInfo {
                             region_id,
@@ -383,7 +464,7 @@ impl AutoSplitController {
                         split_maps.remove(&region_id);
                         info!("load base split region";"region_id"=>region_id);
                     } else {
-                        info!("load base split, failed in collect";"region_id"=>region_id);
+                        info!("load base split: failed in ratio_split";"region_id"=>region_id);
                     }
                     self.recorders.remove(&region_id);
                 }
