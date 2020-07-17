@@ -17,6 +17,7 @@ use time::{Duration, Timespec};
 
 use super::peer_storage;
 use crate::{Error, Result};
+use crate::store::worker::RequestInfo;
 use tikv_util::Either;
 
 pub fn find_peer(region: &metapb::Region, store_id: u64) -> Option<&metapb::Peer> {
@@ -284,6 +285,19 @@ pub fn build_key_range(start_key: &[u8], end_key: &[u8], reverse_scan: bool) -> 
         range.set_end_key(end_key.to_vec());
     }
     range
+}
+
+#[inline]
+pub fn build_req_info(start_key: &[u8], end_key: &[u8], reverse_scan: bool) -> RequestInfo {
+    let mut req_info = RequestInfo::default();
+    if reverse_scan {
+        req_info.start_key = end_key.to_vec();
+        req_info.end_key = start_key.to_vec();
+    } else {
+        req_info.start_key = start_key.to_vec();
+        req_info.end_key = end_key.to_vec();
+    }
+    req_info
 }
 
 /// Check if replicas of two regions are on the same stores.

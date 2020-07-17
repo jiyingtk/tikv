@@ -11,7 +11,7 @@ use crate::storage::kv::{FlowStatsReporter, Statistics};
 use kvproto::kvrpcpb::KeyRange;
 use kvproto::metapb;
 use raftstore::store::util::build_key_range;
-use raftstore::store::ReadStats;
+use raftstore::store::{ReadStats, RequestInfo};
 use tikv_util::collections::HashMap;
 
 struct StorageLocalMetrics {
@@ -93,6 +93,40 @@ pub fn tls_collect_qps_batch(region_id: u64, peer: &metapb::Peer, key_ranges: Ve
         let mut m = m.borrow_mut();
         m.local_read_stats
             .add_qps_batch(region_id, peer, key_ranges);
+    });
+}
+
+pub fn tls_collect_req_info(
+    region_id: u64,
+    peer: &metapb::Peer,
+    mut req_info: RequestInfo,
+    statistics: &Statistics,
+) {
+    TLS_STORAGE_METRICS.with(|m| {
+        if req_info.start_key.is_empty() && req_info.end_key.is_empty() {
+            return;
+        }
+        let mut m = m.borrow_mut();
+        req_info.bytes = statistics.total_read_bytes();
+        req_info.keys = statistics.total_read_keys();
+        m.local_read_stats.add_req_info(region_id, peer, req_info);
+    });
+}
+
+pub fn tls_collect_req_info_batch(region_id: u64, peer: &metapb::Peer, mut req_infos: Vec<RequestInfo>, statistics: &Statistics) {
+    TLS_STORAGE_METRICS.with(|m| {
+        if req_infos.is_empty() {
+            return;
+        }
+        let mut m = m.borrow_mut();
+        let avg_bytes = statistics.total_read_bytes() / req_infos.len();
+        let avg_keys = statistics.total_read_keys() / req_infos.len();
+        for req_info in &mut req_infos {
+            req_info.bytes = avg_bytes;
+            req_info.keys = avg_keys;
+        }
+        m.local_read_stats
+            .add_req_info_batch(region_id, peer, req_infos);
     });
 }
 

@@ -96,6 +96,20 @@ impl Statistics {
         self.lock.processed + self.write.processed + self.data.processed
     }
 
+    pub fn total_read_bytes(&self) -> usize {
+        let mut total: usize = 0;
+        total = total.saturating_add(self.write.flow_stats.read_bytes);
+        total = total.saturating_add(self.data.flow_stats.read_bytes);
+        total
+    }
+
+    pub fn total_read_keys(&self) -> usize {
+        let mut total: usize = 0;
+        total = total.saturating_add(self.write.flow_stats.read_keys);
+        total = total.saturating_add(self.data.flow_stats.read_keys);
+        total
+    }
+
     pub fn details(&self) -> [(&'static str, [(&'static str, usize); 8]); 3] {
         [
             (CF_DEFAULT, self.data.details()),

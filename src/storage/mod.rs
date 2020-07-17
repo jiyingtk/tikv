@@ -46,11 +46,13 @@ use engine_traits::{IterOptions, DATA_KEY_PREFIX_LEN};
 use futures::Future;
 use futures03::prelude::*;
 use kvproto::kvrpcpb::{CommandPri, Context, GetRequest, KeyRange, RawGetRequest};
-use raftstore::store::util::build_key_range;
+use raftstore::store::RequestInfo;
+use raftstore::store::util::build_req_info;
 use rand::prelude::*;
 use std::sync::{atomic, Arc};
 use tikv_util::time::Instant;
 use txn_types::{Key, KvPair, TimeStamp, TsSet, Value};
+
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback<T> = Box<dyn FnOnce(Result<T>) + Send>;
@@ -208,10 +210,9 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
-                if let Ok(key) = key.to_owned().into_raw() {
-                    tls_collect_qps(ctx.get_region_id(), ctx.get_peer(), &key, &key, false);
-                }
-
+                // if let Ok(key) = key.to_owned().into_raw() {
+                //     tls_collect_qps(ctx.get_region_id(), ctx.get_peer(), &key, &key, false);
+                // }
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
                     .get(priority_tag)
@@ -243,6 +244,10 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             r
                         });
 
+                    if let Ok(key) = key.to_owned().into_raw() {
+                        let req_info = build_req_info(&key, &key, false);
+                        metrics::tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &statistics);
+                    }
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
@@ -277,15 +282,21 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority_tag = get_priority_tag(priority);
         let res = self.read_pool.spawn_handle(
             async move {
+                // for get in &gets {
+                //     if let Ok(key) = get.key.to_owned().into_raw() {
+                //         tls_collect_qps(
+                //             get.ctx.get_region_id(),
+                //             get.ctx.get_peer(),
+                //             &key,
+                //             &key,
+                //             false,
+                //         );
+                //     }
+                // }
+                let mut req_infos = vec![];
                 for get in &gets {
                     if let Ok(key) = get.key.to_owned().into_raw() {
-                        tls_collect_qps(
-                            get.ctx.get_region_id(),
-                            get.ctx.get_peer(),
-                            &key,
-                            &key,
-                            false,
-                        );
+                        req_infos.push(build_req_info(&key, &key, false));
                     }
                 }
 
@@ -323,6 +334,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                                 .map_err(Error::from),
                         );
                     }
+                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &statistics);
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
@@ -357,13 +369,19 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
-                let mut key_ranges = vec![];
+                // let mut key_ranges = vec![];
+                // for key in &keys {
+                //     if let Ok(key) = key.to_owned().into_raw() {
+                //         key_ranges.push(build_key_range(&key, &key, false));
+                //     }
+                // }
+                // tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
+                let mut req_infos = vec![];
                 for key in &keys {
                     if let Ok(key) = key.to_owned().into_raw() {
-                        key_ranges.push(build_key_range(&key, &key, false));
+                        req_infos.push(build_req_info(&key, &key, false));
                     }
                 }
-                tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -408,6 +426,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             kv_pairs
                         });
 
+                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &statistics);
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
@@ -448,6 +467,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
+                let mut req_info = RequestInfo::default();
                 if let Ok(start_key) = start_key.to_owned().into_raw() {
                     let mut key = vec![];
                     if let Some(end_key) = &end_key {
@@ -455,13 +475,14 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             key = end_key;
                         }
                     }
-                    tls_collect_qps(
-                        ctx.get_region_id(),
-                        ctx.get_peer(),
-                        &start_key,
-                        &key,
-                        reverse_scan,
-                    );
+                    req_info = build_req_info(&start_key, &key, reverse_scan);
+                    // tls_collect_qps(
+                    //     ctx.get_region_id(),
+                    //     ctx.get_peer(),
+                    //     &start_key,
+                    //     &key,
+                    //     reverse_scan,
+                    // );
                 }
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
@@ -496,6 +517,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     let res = scanner.scan(limit);
 
                     let statistics = scanner.take_statistics();
+                    metrics::tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &statistics);
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
@@ -614,7 +636,8 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
-                tls_collect_qps(ctx.get_region_id(), ctx.get_peer(), &key, &key, false);
+                // tls_collect_qps(ctx.get_region_id(), ctx.get_peer(), &key, &key, false);
+                let req_info = build_req_info(&key, &key, false);
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -634,6 +657,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                         let mut stats = Statistics::default();
                         stats.data.flow_stats.read_keys = 1;
                         stats.data.flow_stats.read_bytes = key_len + value.len();
+                        tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &stats);
                         tls_collect_read_flow(ctx.get_region_id(), &stats);
                         KV_COMMAND_KEYREAD_HISTOGRAM_STATIC.get(CMD).observe(1_f64);
                     }
@@ -669,16 +693,18 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority_tag = get_priority_tag(priority);
         let res = self.read_pool.spawn_handle(
             async move {
+                let mut req_infos = vec![];
                 for get in &gets {
                     if let Ok(key) = get.key.to_owned().into_raw() {
-                        // todo no raw?
-                        tls_collect_qps(
-                            get.ctx.get_region_id(),
-                            get.ctx.get_peer(),
-                            &key,
-                            &key,
-                            false,
-                        );
+                        req_infos.push(build_req_info(&key, &key, false));
+                        // // todo no raw?
+                        // tls_collect_qps(
+                        //     get.ctx.get_region_id(),
+                        //     get.ctx.get_peer(),
+                        //     &key,
+                        //     &key,
+                        //     false,
+                        // );
                     }
                 }
 
@@ -710,6 +736,8 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             .map_err(Error::from);
                         results.push(res);
                     }
+                    // or using non-batch
+                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &stats);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &stats);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
                         .get(CMD)
@@ -741,11 +769,15 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
-                let mut key_ranges = vec![];
+                // let mut key_ranges = vec![];
+                // for key in &keys {
+                //     key_ranges.push(build_key_range(key, key, false));
+                // }
+                // tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
+                let mut req_infos = vec![];
                 for key in &keys {
-                    key_ranges.push(build_key_range(key, key, false));
+                    req_infos.push(build_req_info(&key, &key, false));
                 }
-                tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -781,6 +813,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
                         .get(CMD)
                         .observe(stats.data.flow_stats.read_keys as f64);
+                    tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &stats);
                     tls_collect_read_flow(ctx.get_region_id(), &stats);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
                         .get(CMD)
@@ -1036,19 +1069,23 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         let res = self.read_pool.spawn_handle(
             async move {
-                {
-                    let end_key = match &end_key {
-                        Some(end_key) => end_key.to_vec(),
-                        None => vec![],
-                    };
-                    tls_collect_qps(
-                        ctx.get_region_id(),
-                        ctx.get_peer(),
-                        &start_key,
-                        &end_key,
-                        reverse_scan,
-                    );
+                let mut req_info = RequestInfo::default();
+                if let Some(end_key) = &end_key {
+                    req_info = build_req_info(&start_key, &end_key, reverse_scan);
                 }
+                // {
+                //     let end_key = match &end_key {
+                //         Some(end_key) => end_key.to_vec(),
+                //         None => vec![],
+                //     };
+                //     tls_collect_qps(
+                //         ctx.get_region_id(),
+                //         ctx.get_peer(),
+                //         &start_key,
+                //         &end_key,
+                //         reverse_scan,
+                //     );
+                // }
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -1087,7 +1124,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                         )
                         .map_err(Error::from)
                     };
-
+                    metrics::tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
                         .get(CMD)
@@ -1213,15 +1250,24 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                         };
                         result.extend(pairs.into_iter());
                     }
-                    let mut key_ranges = vec![];
+                    // let mut key_ranges = vec![];
+                    // for range in ranges {
+                    //     key_ranges.push(build_key_range(
+                    //         &range.start_key,
+                    //         &range.end_key,
+                    //         reverse_scan,
+                    //     ));
+                    // }
+                    // tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
+                    let mut req_infos = vec![];
                     for range in ranges {
-                        key_ranges.push(build_key_range(
+                        req_infos.push(build_req_info(
                             &range.start_key,
                             &range.end_key,
                             reverse_scan,
                         ));
                     }
-                    tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
+                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
                         .get(CMD)

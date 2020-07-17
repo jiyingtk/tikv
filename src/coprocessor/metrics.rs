@@ -6,7 +6,7 @@ use std::mem;
 use crate::storage::{FlowStatsReporter, Statistics};
 use kvproto::metapb;
 use raftstore::store::util::build_key_range;
-use raftstore::store::ReadStats;
+use raftstore::store::{ReadStats, RequestInfo};
 use tikv_util::collections::HashMap;
 
 use crate::server::metrics::{GcKeysCF, GcKeysDetail};
@@ -282,5 +282,21 @@ pub fn tls_collect_qps(
         let mut m = m.borrow_mut();
         let key_range = build_key_range(start_key, end_key, reverse_scan);
         m.local_read_stats.add_qps(region_id, peer, key_range);
+    });
+}
+
+pub fn tls_collect_req_info(
+    region_id: u64,
+    peer: &metapb::Peer,
+    mut req_info: RequestInfo,
+    statistics: &Statistics,
+) {
+    TLS_COP_METRICS.with(|m| {
+        let mut m = m.borrow_mut();
+        req_info.bytes = req_info.bytes.saturating_add(statistics.write.flow_stats.read_bytes);
+        req_info.bytes = req_info.bytes.saturating_add(statistics.data.flow_stats.read_bytes);
+        req_info.keys = req_info.keys.saturating_add(statistics.write.flow_stats.read_keys);
+        req_info.keys = req_info.keys.saturating_add(statistics.data.flow_stats.read_keys);
+        m.local_read_stats.add_req_info(region_id, peer, req_info);
     });
 }
