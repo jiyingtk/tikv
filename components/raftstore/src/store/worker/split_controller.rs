@@ -29,6 +29,14 @@ pub struct RatioSplitInfo
     pub ratio: f64,
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct RequestInfo {
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+    pub bytes: usize,
+    pub keys: usize,
+}
+
 pub struct SplitInfo {
     pub region_id: u64,
     pub split_key: Vec<u8>,
@@ -106,6 +114,7 @@ pub struct RegionInfo {
     pub qps: usize,
     pub peer: Peer,
     pub key_ranges: Vec<KeyRange>,
+    pub req_infos: Vec<RequestInfo>,
 }
 
 impl RegionInfo {
@@ -115,6 +124,7 @@ impl RegionInfo {
             qps: 0,
             key_ranges: Vec::with_capacity(sample_num),
             peer: Peer::default(),
+            req_infos: Vec::with_capacity(sample_num),
         }
     }
 
@@ -135,6 +145,20 @@ impl RegionInfo {
                 let i = rand::thread_rng().gen_range(0, self.qps) as usize;
                 if i < self.sample_num {
                     self.key_ranges[i] = key_range;
+                }
+            }
+        }
+    }
+
+    fn add_req_infos(&mut self, req_infos: Vec<RequestInfo>) {
+        self.qps += req_infos.len();
+        for req_info in req_infos {
+            if self.req_infos.len() < self.sample_num {
+                self.req_infos.push(req_info);
+            } else {
+                let i = rand::thread_rng().gen_range(0, self.qps) as usize;
+                if i < self.sample_num {
+                    self.req_infos[i] = req_info;
                 }
             }
         }
@@ -313,6 +337,20 @@ impl ReadStats {
             .or_insert_with(|| RegionInfo::new(num));
         region_info.update_peer(peer);
         region_info.add_key_ranges(key_ranges);
+    }
+
+    pub fn add_req_info(&mut self, region_id: u64, peer: &Peer, req_info: RequestInfo) {
+        self.add_req_info_batch(region_id, peer, vec![req_info]);
+    }
+
+    pub fn add_req_info_batch(&mut self, region_id: u64, peer: &Peer, req_infos: Vec<RequestInfo>) {
+        let num = self.sample_num;
+        let region_info = self
+            .region_infos
+            .entry(region_id)
+            .or_insert_with(|| RegionInfo::new(num));
+        region_info.update_peer(peer);
+        region_info.add_req_infos(req_infos);
     }
 
     pub fn add_flow(&mut self, region_id: u64, write: &FlowStatistics, data: &FlowStatistics) {

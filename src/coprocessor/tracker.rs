@@ -5,6 +5,7 @@ use kvproto::kvrpcpb::ScanDetailV2;
 
 use crate::storage::kv::{PerfStatisticsDelta, PerfStatisticsInstant};
 
+use raftstore::store::util::build_req_info;
 use tikv_util::time::{self, Duration, Instant};
 
 use super::metrics::*;
@@ -330,7 +331,9 @@ impl Tracker {
             false
         };
 
-        tls_collect_qps(region_id, peer, start_key, end_key, reverse_scan);
+        // tls_collect_qps(region_id, peer, start_key, end_key, reverse_scan);
+        let req_info = build_req_info(&start_key, &end_key, reverse_scan);
+        tls_collect_req_info(region_id, peer, req_info, &total_storage_stats);
         self.current_stage = TrackerState::Tracked;
     }
 }

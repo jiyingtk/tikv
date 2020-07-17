@@ -295,15 +295,13 @@ where
     thread_info_interval: Duration,
     qps_info_interval: Duration,
     collect_interval: Duration,
-
-    ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
 }
 
 impl<E> StatsMonitor<E>
 where
     E: KvEngine,
 {
-    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>, ratio_split_maps: Arc<Mutex<HashMap<u64, RatioSplitInfo>>>,
+    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>,
     ) -> Self {
         StatsMonitor {
             scheduler,
@@ -313,7 +311,6 @@ where
             thread_info_interval: interval,
             qps_info_interval: cmp::min(DEFAULT_QPS_INFO_INTERVAL, interval),
             collect_interval: cmp::min(DEFAULT_COLLECT_INTERVAL, interval),
-            ratio_split_maps,
         }
     }
 
@@ -346,8 +343,6 @@ where
         self.sender = Some(sender);
 
         let scheduler = self.scheduler.clone();
-
-        let ratio_split_maps = self.ratio_split_maps.clone();
 
         let h = Builder::new()
             .name(thd_name!("stats-monitor"))
@@ -471,8 +466,8 @@ where
         concurrency_manager: ConcurrencyManager,
     ) -> Runner<EK, ER, T> {
         let interval = store_heartbeat_interval / Self::INTERVAL_DIVISOR;
+        let mut stats_monitor = StatsMonitor::new(interval, scheduler.clone());
         let ratio_split_maps = Arc::new(Mutex::new(HashMap::default()));
-        let mut stats_monitor = StatsMonitor::new(interval, scheduler.clone(), ratio_split_maps.clone());
         auto_split_controller.ratio_split_maps = ratio_split_maps.clone();
         if let Err(e) = stats_monitor.start(auto_split_controller) {
             error!("failed to start stats collector, error = {:?}", e);
@@ -1313,7 +1308,7 @@ mod tests {
             scheduler: Scheduler<Task<RocksEngine>>,
             store_stat: Arc<Mutex<StoreStat>>,
         ) -> RunnerTest {
-            let mut stats_monitor = StatsMonitor::new(Duration::from_secs(interval), scheduler, Arc::new(Mutex::new(HashMap::default())));
+            let mut stats_monitor = StatsMonitor::new(Duration::from_secs(interval), scheduler);
 
             if let Err(e) = stats_monitor.start(AutoSplitController::default()) {
                 error!("failed to start stats collector, error = {:?}", e);
