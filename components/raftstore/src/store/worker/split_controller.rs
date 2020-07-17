@@ -150,6 +150,10 @@ impl RegionInfo {
         }
     }
 
+    fn get_req_infos_mut(&mut self) -> &mut Vec<RequestInfo> {
+        &mut self.req_infos
+    }
+
     fn add_req_infos(&mut self, req_infos: Vec<RequestInfo>) {
         self.qps += req_infos.len();
         for req_info in req_infos {
@@ -175,6 +179,7 @@ pub struct Recorder {
     pub detect_num: u64,
     pub peer: Peer,
     pub key_ranges: Vec<Vec<KeyRange>>,
+    pub req_infos: Vec<Vec<RequestInfo>>,
     pub times: u64,
     pub create_time: SystemTime,
 }
@@ -185,6 +190,7 @@ impl Recorder {
             detect_num,
             peer: Peer::default(),
             key_ranges: vec![],
+            req_infos: vec![],
             times: 0,
             create_time: SystemTime::now(),
         }
@@ -193,6 +199,11 @@ impl Recorder {
     fn record(&mut self, key_ranges: Vec<KeyRange>) {
         self.times += 1;
         self.key_ranges.push(key_ranges);
+    }
+
+    fn record_req_infos(&mut self, req_infos: Vec<RequestInfo>) {
+        self.times += 1;
+        self.req_infos.push(req_infos);
     }
 
     fn update_peer(&mut self, peer: &Peer) {
@@ -226,21 +237,33 @@ impl Recorder {
     }
 
     fn ratio_split(&mut self, _config: &SplitConfig, ratio_split_info: &RatioSplitInfo) -> Vec<u8> {
-        let mut key_ranges = vec![];
-        for key_ranges_part in &mut self.key_ranges {
-            key_ranges.append(key_ranges_part);
+        let mut req_infos = vec![];
+        for req_infos_part in &mut self.req_infos {
+            req_infos.append(req_infos_part);
         }
 
-        key_ranges.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+        req_infos.sort_by(|a, b| a.start_key.cmp(&b.start_key));
 
-        let sum = key_ranges.len() as f64;
+        let mut sum: f64 = 0.0;
+        if ratio_split_info.dim_id == 0 {   // IO, bytes rate
+            for req_info in &req_infos {
+                sum += req_info.bytes as f64;
+            }
+        } else {
+            sum = req_infos.len() as f64;
+        }
+        
         let target = ratio_split_info.ratio * sum;
         let mut current = 0.0;
         let mut target_key: Vec<u8> = vec![];
-        for key_range in &key_ranges {
-            current += 1.0;
+        for req_info in &req_infos {
+            current += if ratio_split_info.dim_id == 0 {
+                req_info.bytes as f64
+            } else {
+                1.0
+            };
             if current >= target {
-                target_key = key_range.start_key.clone();
+                target_key = req_info.start_key.clone();
                 break;
             }
         }
@@ -449,9 +472,8 @@ impl AutoSplitController {
         (top.into_vec(), split_infos)
     }
 
-    pub fn process_ratio_split(&mut self, others: Vec<ReadStats>) -> (Vec<usize>, Vec<SplitInfo>) {
+    pub fn process_ratio_split(&mut self, others: Vec<ReadStats>) -> Vec<SplitInfo> {
         let mut split_infos = Vec::default();
-        let mut top = BinaryHeap::with_capacity(TOP_N as usize);
         let mut split_maps = self.ratio_split_maps.lock().unwrap();
 
         // collect from different thread
@@ -469,9 +491,6 @@ impl AutoSplitController {
         }
 
         for (region_id, region_infos) in region_infos_map {
-            let pre_sum = prefix_sum(region_infos.iter(), RegionInfo::get_qps);
-
-            let qps = *pre_sum.last().unwrap(); // region_infos is not empty
             let num = self.cfg.detect_times;
             if split_maps.contains_key(&region_id) {
                 let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::default());
@@ -483,12 +502,12 @@ impl AutoSplitController {
 
                 recorder.update_peer(&region_infos[0].peer);
 
-                let mut key_ranges = vec![];
+                let mut req_infos = vec![];
                 for mut region_info in region_infos {
-                    key_ranges.append(region_info.get_key_ranges_mut());
+                    req_infos.append(region_info.get_req_infos_mut());
                 }
 
-                recorder.record(key_ranges);
+                recorder.record_req_infos(req_infos);
 
                 if recorder.is_ready() {
                     let key = recorder.ratio_split(&self.cfg, ratio_split_info);
@@ -500,19 +519,18 @@ impl AutoSplitController {
                         };
                         split_infos.push(split_info);
                         split_maps.remove(&region_id);
-                        info!("load base split region";"region_id"=>region_id);
+                        info!("ratio split region: success";"region_id"=>region_id);
                     } else {
-                        info!("load base split: failed in ratio_split";"region_id"=>region_id);
+                        info!("ratio split region: failed";"region_id"=>region_id);
                     }
                     self.recorders.remove(&region_id);
                 }
             } else {
                 self.recorders.remove_entry(&region_id);
             }
-            top.push(qps);
         }
 
-        (top.into_vec(), split_infos)
+        split_infos
     }
 
     pub fn clear(&mut self) {

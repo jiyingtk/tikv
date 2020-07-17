@@ -360,7 +360,7 @@ where
                             others.push(other);
                         }
 
-                        let (top, split_infos) = auto_split_controller.process_ratio_split(others);
+                        let split_infos = auto_split_controller.process_ratio_split(others);
                         auto_split_controller.clear();
                         let task = Task::AutoSplit { split_infos };
                         if let Err(e) = scheduler.schedule(task) {
@@ -370,15 +370,15 @@ where
                             );
                         }
 
-                        for i in 0..TOP_N {
-                            if i < top.len() {
-                                READ_QPS_TOPN
-                                    .with_label_values(&[&i.to_string()])
-                                    .set(top[i] as f64);
-                            } else {
-                                READ_QPS_TOPN.with_label_values(&[&i.to_string()]).set(0.0);
-                            }
-                        }
+                        // for i in 0..TOP_N {
+                        //     if i < top.len() {
+                        //         READ_QPS_TOPN
+                        //             .with_label_values(&[&i.to_string()])
+                        //             .set(top[i] as f64);
+                        //     } else {
+                        //         READ_QPS_TOPN.with_label_values(&[&i.to_string()]).set(0.0);
+                        //     }
+                        // }
                     }
                     // modules timer_cnt with the least common multiple of intervals to avoid overflow
                     timer_cnt = (timer_cnt + 1) % (qps_info_interval * thread_info_interval);
