@@ -293,12 +293,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 //         );
                 //     }
                 // }
-                let mut req_infos = vec![];
-                for get in &gets {
-                    if let Ok(key) = get.key.to_owned().into_raw() {
-                        req_infos.push(build_req_info(&key, &key, false));
-                    }
-                }
 
                 KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
                 SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -311,6 +305,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 {
                     let begin_instant = Instant::now_coarse();
                     let mut statistics = Statistics::default();
+                    let mut pre_read_bytes = 0;
                     let mut snap_store = SnapshotStore::new(
                         snapshot,
                         TimeStamp::zero(),
@@ -333,8 +328,15 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                                 .get(&get.key, &mut statistics)
                                 .map_err(Error::from),
                         );
+                        if let Ok(key) = get.key.to_owned().into_raw() {
+                            let mut stats = Statistics::default();
+                            stats.data.flow_stats.read_keys = 1;
+                            stats.data.flow_stats.read_bytes = statistics.total_read_bytes() - pre_read_bytes;
+                            let req_info = build_req_info(&key, &key, false);
+                            metrics::tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &stats);
+                        }
+                        pre_read_bytes = statistics.total_read_bytes();
                     }
-                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &statistics);
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
@@ -1210,12 +1212,21 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 {
                     let begin_instant = Instant::now();
                     let mut statistics = Statistics::default();
+                    let mut pre_read_bytes = 0;
+                    let mut pre_read_keys = 0;
+                    
                     if !Self::check_key_ranges(&ranges, reverse_scan) {
                         return Err(box_err!("Invalid KeyRanges"));
                     };
                     let mut result = Vec::new();
                     let ranges_len = ranges.len();
                     for i in 0..ranges_len {
+                        let req_info = build_req_info(
+                            &ranges[i].start_key,
+                            &ranges[i].end_key,
+                            reverse_scan,
+                        );
+
                         let start_key = Key::from_encoded(ranges[i].take_start_key());
                         let end_key = ranges[i].take_end_key();
                         let end_key = if end_key.is_empty() {
@@ -1249,6 +1260,14 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             )?
                         };
                         result.extend(pairs.into_iter());
+
+                        let mut stats = Statistics::default();
+                        stats.data.flow_stats.read_keys = statistics.total_read_keys() - pre_read_keys;
+                        stats.data.flow_stats.read_bytes = statistics.total_read_bytes() - pre_read_bytes;
+                        metrics::tls_collect_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, &stats);
+
+                        pre_read_keys = statistics.total_read_keys();
+                        pre_read_bytes = statistics.total_read_bytes();
                     }
                     // let mut key_ranges = vec![];
                     // for range in ranges {
@@ -1259,15 +1278,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     //     ));
                     // }
                     // tls_collect_qps_batch(ctx.get_region_id(), ctx.get_peer(), key_ranges);
-                    let mut req_infos = vec![];
-                    for range in ranges {
-                        req_infos.push(build_req_info(
-                            &range.start_key,
-                            &range.end_key,
-                            reverse_scan,
-                        ));
-                    }
-                    metrics::tls_collect_req_info_batch(ctx.get_region_id(), ctx.get_peer(), req_infos, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
                         .get(CMD)

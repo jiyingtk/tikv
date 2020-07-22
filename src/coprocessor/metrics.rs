@@ -293,10 +293,8 @@ pub fn tls_collect_req_info(
 ) {
     TLS_COP_METRICS.with(|m| {
         let mut m = m.borrow_mut();
-        req_info.bytes = req_info.bytes.saturating_add(statistics.write.flow_stats.read_bytes);
-        req_info.bytes = req_info.bytes.saturating_add(statistics.data.flow_stats.read_bytes);
-        req_info.keys = req_info.keys.saturating_add(statistics.write.flow_stats.read_keys);
-        req_info.keys = req_info.keys.saturating_add(statistics.data.flow_stats.read_keys);
+        req_info.bytes = statistics.total_read_bytes();
+        req_info.keys = statistics.total_read_keys();
         m.local_read_stats.add_req_info(region_id, peer, req_info);
     });
 }
