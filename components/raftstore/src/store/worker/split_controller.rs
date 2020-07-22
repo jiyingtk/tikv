@@ -37,6 +37,16 @@ pub struct RequestInfo {
     pub keys: usize,
 }
 
+impl RequestInfo {
+    fn get_load(&self, id: u64) -> f64 {
+        if id == 0 {
+            self.bytes as f64
+        } else {
+            1.0
+        }
+    }
+}
+
 pub struct SplitInfo {
     pub region_id: u64,
     pub split_key: Vec<u8>,
@@ -236,40 +246,88 @@ impl Recorder {
         )
     }
 
+    fn choose_bound(&self, mut req_infos: Vec<RequestInfo>, ratio_split_info: &RatioSplitInfo, reverse: bool) -> (Vec<u8>, Vec<RequestInfo>) {
+        if !reverse {
+            req_infos.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+        } else {
+            req_infos.sort_by(|a, b| b.end_key.cmp(&a.end_key));
+        }
+
+        let mut sum: f64 = 0.0;
+        if ratio_split_info.dim_id == 0 {   // IO dimension: bytes rate
+            for req_info in req_infos.iter() {
+                sum += req_info.bytes as f64;
+            }
+        } else {    // CPU dimension: qps
+            sum = req_infos.len() as f64;
+        }
+        
+        let target = if !reverse {
+            ratio_split_info.ratio * sum
+        } else {
+            (1.0 - ratio_split_info.ratio) * sum
+        };
+        let mut target_key = if !reverse {
+            &req_infos[0].start_key
+        } else {
+            &req_infos[0].end_key
+        };
+
+        let mut current = 0.0;
+        for i in 0..req_infos.len() {
+            let req_info = &req_infos[i];
+            current += req_info.get_load(ratio_split_info.dim_id);
+            if current >= target {
+                target_key = if !reverse {
+                    &req_info.start_key
+                } else {
+                    &req_info.end_key
+                };
+                break;
+            }
+        }
+
+        (target_key.clone(), req_infos)
+    }
+
     fn ratio_split(&mut self, _config: &SplitConfig, ratio_split_info: &RatioSplitInfo) -> Vec<u8> {
         let mut req_infos = vec![];
         for req_infos_part in &mut self.req_infos {
             req_infos.append(req_infos_part);
         }
 
-        req_infos.sort_by(|a, b| a.start_key.cmp(&b.start_key));
-
-        let mut sum: f64 = 0.0;
-        if ratio_split_info.dim_id == 0 {   // IO, bytes rate
-            for req_info in &req_infos {
-                sum += req_info.bytes as f64;
-            }
-        } else {
-            sum = req_infos.len() as f64;
-        }
+        let (right_bound, req_infos) = self.choose_bound(req_infos, ratio_split_info, true);
+        let (left_bound, req_infos) = self.choose_bound(req_infos, ratio_split_info, false);
+        let mut target_key = &left_bound;
         
-        let target = ratio_split_info.ratio * sum;
-        let mut current = 0.0;
-        let mut target_key: Vec<u8> = vec![];
+        let mut contained_num = 0;
         for req_info in &req_infos {
-            current += if ratio_split_info.dim_id == 0 {
-                req_info.bytes as f64
-            } else {
-                1.0
-            };
-            if current >= target {
-                target_key = req_info.start_key.clone();
+            if req_info.start_key.cmp(&left_bound) == Ordering::Greater && req_info.end_key.cmp(&right_bound) == Ordering::Less {
+                contained_num += 1;
+            }
+            if req_info.start_key.cmp(&right_bound) == Ordering::Greater {
                 break;
             }
         }
-        info!("ratio split region"; "sum" => sum, "target" => target, "current" => current, "split_key" => format!("{:?}", &target_key));
+        
+        let target = contained_num / 2;
+        let mut current = 0;
+        for req_info in &req_infos {
+            if req_info.start_key.cmp(&left_bound) == Ordering::Greater && req_info.end_key.cmp(&right_bound) == Ordering::Less {
+                current += 1;
+                if current >= target {
+                    target_key = &req_info.start_key;
+                    break;
+                }
+            }
+            if req_info.start_key.cmp(&right_bound) == Ordering::Greater {
+                break;
+            }
+        }
 
-        target_key
+        info!("ratio split region"; "dim id" => ratio_split_info.dim_id,  "split_key" => format!("{:?}", &target_key), "contained candidate ranges" => contained_num);
+        
+        target_key.clone()
     }
 
     fn sample(samples: &mut Vec<Sample>, key_range: &KeyRange) {
