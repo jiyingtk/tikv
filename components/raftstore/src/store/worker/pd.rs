@@ -301,8 +301,7 @@ impl<E> StatsMonitor<E>
 where
     E: KvEngine,
 {
-    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>,
-    ) -> Self {
+    pub fn new(interval: Duration, scheduler: Scheduler<Task<E>>) -> Self {
         StatsMonitor {
             scheduler,
             handle: None,
@@ -374,6 +373,7 @@ where
                         while let Ok(other) = receiver.try_recv() {
                             others.push(other);
                         }
+                        // let (top, split_infos) = auto_split_controller.flush(others);
 
                         let split_infos = auto_split_controller.process_ratio_split(others);
                         auto_split_controller.clear();

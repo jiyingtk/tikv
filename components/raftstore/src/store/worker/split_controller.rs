@@ -246,7 +246,7 @@ impl Recorder {
         )
     }
 
-    fn choose_bound(&self, mut req_infos: Vec<RequestInfo>, ratio_split_info: &RatioSplitInfo, reverse: bool) -> (Vec<u8>, Vec<RequestInfo>) {
+    fn choose_bounds(&self, mut req_infos: Vec<RequestInfo>, ratio_split_info: &RatioSplitInfo, reverse: bool) -> (Vec<Vec<u8>>, Vec<RequestInfo>) {
         if !reverse {
             req_infos.sort_by(|a, b| a.start_key.cmp(&b.start_key));
         } else {
@@ -262,46 +262,54 @@ impl Recorder {
             sum = req_infos.len() as f64;
         }
         
-        let target = if !reverse {
-            ratio_split_info.ratio * sum
-        } else {
-            (1.0 - ratio_split_info.ratio) * sum
-        };
-        let mut target_key = if !reverse {
-            &req_infos[0].start_key
-        } else {
-            &req_infos[0].end_key
+        let splitted_ratios = {
+            let mut ratios = vec![];
+            let mut ratio = ratio_split_info.ratio;
+            while ratio < 1.0 {
+                ratios.push(ratio);
+                ratio += ratio_split_info.ratio;
+            }
+            ratios
         };
 
-        let mut current = 0.0;
+        let target_loads = if !reverse {
+            let res: Vec<f64> = splitted_ratios.iter().map(|ratio| ratio * sum).collect();
+            res
+        } else {
+            let res: Vec<f64> = splitted_ratios.iter().map(|ratio| (1.0 - ratio) * sum).collect();
+            res
+        };
+        
+        let mut target_keys = vec![];
+        let mut cur_target = 0;
+        let mut cur_load = 0.0;
         for i in 0..req_infos.len() {
             let req_info = &req_infos[i];
-            current += req_info.get_load(ratio_split_info.dim_id);
-            if current >= target {
-                target_key = if !reverse {
+            cur_load += req_info.get_load(ratio_split_info.dim_id);
+            while cur_target < target_loads.len() && cur_load >= target_loads[cur_target] {
+                let key = if !reverse {
                     &req_info.start_key
                 } else {
                     &req_info.end_key
                 };
+                target_keys.push(key.clone());
+                cur_target += 1;
+                info!("choose_bound"; "reverse" => reverse, "cur_load" => cur_load, "cur_target" => cur_target, "total_load" => sum);
+            }
+            if cur_target >= target_loads.len() {
                 break;
             }
         }
 
-        (target_key.clone(), req_infos)
+        (target_keys, req_infos)
     }
 
-    fn ratio_split(&mut self, _config: &SplitConfig, ratio_split_info: &RatioSplitInfo) -> Vec<u8> {
-        let mut req_infos = vec![];
-        for req_infos_part in &mut self.req_infos {
-            req_infos.append(req_infos_part);
-        }
-
-        let (right_bound, req_infos) = self.choose_bound(req_infos, ratio_split_info, true);
-        let (left_bound, req_infos) = self.choose_bound(req_infos, ratio_split_info, false);
-        let mut target_key = &left_bound;
+    fn choose_middle(&self, req_infos: &Vec<RequestInfo>, left_bound: &Vec<u8>, right_bound: &Vec<u8>) -> Vec<u8> {
+        let mut target_key = left_bound;
         
+        // the most proper split-key is in [left_bound, right_bound], we choose the middle key as the split-key
         let mut contained_num = 0;
-        for req_info in &req_infos {
+        for req_info in req_infos {
             if req_info.start_key.cmp(&left_bound) == Ordering::Greater && req_info.end_key.cmp(&right_bound) == Ordering::Less {
                 contained_num += 1;
             }
@@ -312,7 +320,7 @@ impl Recorder {
         
         let target = contained_num / 2;
         let mut current = 0;
-        for req_info in &req_infos {
+        for req_info in req_infos {
             if req_info.start_key.cmp(&left_bound) == Ordering::Greater && req_info.end_key.cmp(&right_bound) == Ordering::Less {
                 current += 1;
                 if current >= target {
@@ -324,10 +332,54 @@ impl Recorder {
                 break;
             }
         }
+        info!("choose_middle in ratio based splitting"; "split_key" => format!("{:?}", &target_key), "contained candidate ranges" => contained_num);
 
-        info!("ratio split region"; "dim id" => ratio_split_info.dim_id,  "split_key" => format!("{:?}", &target_key), "contained candidate ranges" => contained_num);
-        
         target_key.clone()
+    }
+
+    fn dedup_keys(&self, input: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut output = vec![];
+        if input.len() >= 1 {
+            output.push(input[0].clone());
+        }
+        let mut slow = 0;
+        let mut fast = 1;
+        while fast < input.len() {
+            if output[slow].cmp(&input[fast]) != Ordering::Equal {
+                output.push(input[fast].clone());
+                slow += 1;
+            }
+            fast += 1;
+        }
+        output
+    }
+
+    fn ratio_split(&mut self, _config: &SplitConfig, ratio_split_info: &RatioSplitInfo) -> Vec<Vec<u8>> {
+        let mut req_infos = vec![];
+        for req_infos_part in &mut self.req_infos {
+            req_infos.append(req_infos_part);
+        }
+
+        let (right_bounds, req_infos) = self.choose_bounds(req_infos, ratio_split_info, true);
+        let (left_bounds, req_infos) = self.choose_bounds(req_infos, ratio_split_info, false);
+
+        if left_bounds.len() == 0 || right_bounds.len() == 0 || left_bounds.len() != right_bounds.len() {
+            warn!("choose_bounds does not work in ratio based splitting"; "left_bounds len" => left_bounds.len(), "right_bounds len" => right_bounds.len());
+            return vec![];
+        }
+
+        // use middle key of each range as the splitted key.
+        let mut target_keys = vec![];
+        for i in 0..left_bounds.len() {
+            target_keys.push(self.choose_middle(&req_infos, &left_bounds[i], &right_bounds[i]));
+        }
+
+        let before_len = target_keys.len();
+        let deduped_keys = self.dedup_keys(target_keys);
+
+        info!("ratio split region"; "dim id" => ratio_split_info.dim_id, "ratio" => ratio_split_info.ratio, "before_dedup len" => before_len, "after_dedup len" => deduped_keys.len());
+        
+        deduped_keys
     }
 
     fn sample(samples: &mut Vec<Sample>, key_range: &KeyRange) {
@@ -568,14 +620,17 @@ impl AutoSplitController {
                 recorder.record_req_infos(req_infos);
 
                 if recorder.is_ready() {
-                    let key = recorder.ratio_split(&self.cfg, ratio_split_info);
-                    if !key.is_empty() {
-                        let split_info = SplitInfo {
-                            region_id,
-                            split_key: Key::from_raw(&key).into_encoded(),
-                            peer: recorder.peer.clone(),
-                        };
-                        split_infos.push(split_info);
+                    let keys = recorder.ratio_split(&self.cfg, ratio_split_info);
+                    if !keys.is_empty() {
+                        let split_keys: Vec<Vec<u8>> = keys.iter().map(|key| Key::from_raw(&key).into_encoded()).collect();
+                        for split_key in split_keys {
+                            let split_info = SplitInfo {
+                                region_id,
+                                split_key,
+                                peer: recorder.peer.clone(),
+                            };
+                            split_infos.push(split_info);
+                        }
                         split_maps.remove(&region_id);
                         info!("ratio split region: success";"region_id"=>region_id);
                     } else {
