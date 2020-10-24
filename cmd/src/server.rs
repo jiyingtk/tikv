@@ -527,6 +527,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         let storage = create_raft_storage(
             engines.engine.clone(),
             &self.config.storage,
+            pd_sender.clone(),
             storage_read_pool_handle,
             lock_mgr.clone(),
             self.concurrency_manager.clone(),

@@ -31,7 +31,7 @@ use tikv_util::{callback::must_call, collections::HashMap, time::Instant};
 use txn_types::TimeStamp;
 
 use crate::storage::kv::{
-    drop_snapshot_callback, with_tls_engine, Engine, Result as EngineResult, Statistics,
+    drop_snapshot_callback, with_tls_engine, Engine, FlowStatsReporter, Result as EngineResult, Statistics,
 };
 use crate::storage::lock_manager::{self, LockManager, WaitTimeout};
 use crate::storage::metrics::{
@@ -252,9 +252,10 @@ unsafe impl<E: Engine, L: LockManager> Send for Scheduler<E, L> {}
 
 impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// Creates a scheduler.
-    pub(in crate::storage) fn new(
+    pub(in crate::storage) fn new<R: FlowStatsReporter>(
         engine: E,
         lock_mgr: L,
+        reporter: Option<R>,
 
         concurrency_manager: ConcurrencyManager,
         concurrency: usize,
@@ -277,9 +278,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             latches: Latches::new(concurrency),
             running_write_bytes: AtomicUsize::new(0),
             sched_pending_write_threshold,
-            worker_pool: SchedPool::new(engine.clone(), worker_pool_size, "sched-worker-pool"),
+            worker_pool: SchedPool::new(engine.clone(), reporter.clone(), worker_pool_size, "sched-worker-pool"),
             high_priority_pool: SchedPool::new(
                 engine.clone(),
+                reporter.clone(),
                 std::cmp::max(1, worker_pool_size / 2),
                 "sched-high-pri-pool",
             ),

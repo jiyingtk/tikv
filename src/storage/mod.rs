@@ -43,10 +43,12 @@ use crate::storage::{
     types::StorageCallbackType,
 };
 use concurrency_manager::ConcurrencyManager;
+use engine_rocks::{RocksEngine as RocksEngineTmp};
 use engine_traits::{CfName, ALL_CFS, CF_DEFAULT, DATA_CFS};
 use engine_traits::{IterOptions, DATA_KEY_PREFIX_LEN};
 use futures03::prelude::*;
 use kvproto::kvrpcpb::{CommandPri, Context, GetRequest, IsolationLevel, KeyRange, RawGetRequest};
+use raftstore::store::PdTask;
 use raftstore::store::RequestInfo;
 use raftstore::store::util::build_req_info;
 use raftstore::store::util::build_key_range;
@@ -58,6 +60,7 @@ use std::{
 };
 use tikv_util::time::Instant;
 use tikv_util::time::ThreadReadId;
+use tikv_util::worker::FutureScheduler;
 use txn_types::{Key, KvPair, Lock, TimeStamp, TsSet, Value};
 
 
@@ -162,9 +165,10 @@ macro_rules! check_key_size {
 
 impl<E: Engine, L: LockManager> Storage<E, L> {
     /// Create a `Storage` from given engine.
-    pub fn from_engine(
+    pub fn from_engine<R: FlowStatsReporter>(
         engine: E,
         config: &Config,
+        reporter: Option<R>,
         read_pool: ReadPoolHandle,
         lock_mgr: L,
         concurrency_manager: ConcurrencyManager,
@@ -174,6 +178,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             engine.clone(),
             lock_mgr,
             concurrency_manager.clone(),
+            reporter,
             config.scheduler_concurrency,
             config.scheduler_worker_pool_size,
             config.scheduler_pending_write_threshold.0 as usize,
@@ -1541,6 +1546,7 @@ impl<E: Engine, L: LockManager> TestStorageBuilder<E, L> {
         Storage::from_engine(
             self.engine,
             &self.config,
+            None::<FutureScheduler<PdTask<RocksEngineTmp>>>,
             ReadPool::from(read_pool).handle(),
             self.lock_mgr,
             ConcurrencyManager::new(1.into()),

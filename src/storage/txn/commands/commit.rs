@@ -55,7 +55,13 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Commit {
         // Pessimistic txn needs key_hashes to wake up waiters
         let mut released_locks = ReleasedLocks::new(self.lock_ts, self.commit_ts);
         for k in self.keys {
+            let prev_write_size = txn.write_size();
+            let mut req_info = RequestInfo::default();
+            if let Ok(key) = k.to_owned().into_raw() {
+                req_info = build_req_info(&key, &key, false);
+            }
             released_locks.push(txn.commit(k, self.commit_ts)?);
+            tls_collect_write_req_info(region_id, req_info, txn.write_size() - prev_write_size);
         }
         released_locks.wake_up(context.lock_mgr);
 

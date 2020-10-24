@@ -10,7 +10,7 @@ use crate::import::SSTImporter;
 use crate::read_pool::ReadPoolHandle;
 use crate::server::lock_manager::LockManager;
 use crate::server::Config as ServerConfig;
-use crate::storage::{config::Config as StorageConfig, Storage};
+use crate::storage::{config::Config as StorageConfig, Storage, kv::FlowStatsReporter};
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::RocksEngine;
 use engine_traits::{Engines, Peekable, RaftEngine};
@@ -34,9 +34,10 @@ const CHECK_CLUSTER_BOOTSTRAPPED_RETRY_SECONDS: u64 = 3;
 
 /// Creates a new storage engine which is backed by the Raft consensus
 /// protocol.
-pub fn create_raft_storage<S>(
+pub fn create_raft_storage<S, R: FlowStatsReporter>(
     engine: RaftKv<S>,
     cfg: &StorageConfig,
+    reporter: R,
     read_pool: ReadPoolHandle,
     lock_mgr: LockManager,
     concurrency_manager: ConcurrencyManager,
@@ -48,6 +49,7 @@ where
     let store = Storage::from_engine(
         engine,
         cfg,
+        Some(reporter),
         read_pool,
         lock_mgr,
         concurrency_manager,

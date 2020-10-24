@@ -61,6 +61,8 @@ impl FlowStatistics {
 pub trait FlowStatsReporter: Send + Clone + Sync + 'static {
     // TODO: maybe we need to return a Result later?
     fn report_read_stats(&self, read_stats: ReadStats);
+
+    fn report_write_stats(&self, read_stats: ReadStats);
 }
 
 impl<E> FlowStatsReporter for Scheduler<Task<E>>
@@ -70,6 +72,12 @@ where
     fn report_read_stats(&self, read_stats: ReadStats) {
         if let Err(e) = self.schedule(Task::ReadStats { read_stats }) {
             error!("Failed to send read flow statistics"; "err" => ?e);
+        }
+    }
+
+    fn report_write_stats(&self, read_stats: ReadStats) {
+        if let Err(e) = self.schedule(Task::ReadStats { read_stats }) {
+            error!("Failed to send write flow statistics"; "err" => ?e);
         }
     }
 }

@@ -472,6 +472,15 @@ impl ReadStats {
         region_info.add_key_ranges(key_ranges);
     }
 
+    pub fn add_write_req_info(&mut self, region_id: u64, req_info: RequestInfo) {
+        let num = self.sample_num;
+        let region_info = self
+            .region_infos
+            .entry(region_id)
+            .or_insert_with(|| RegionInfo::new(num));
+        region_info.add_req_infos(vec![req_info]);
+    }
+
     pub fn add_req_info(&mut self, region_id: u64, peer: &Peer, req_info: RequestInfo) {
         self.add_req_info_batch(region_id, peer, vec![req_info]);
     }
