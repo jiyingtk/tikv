@@ -5,6 +5,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kvproto::metapb;
 use prometheus::local::*;
 use raftstore::store::{ReadStats, RequestInfo};
 use tikv_util::collections::HashMap;
@@ -122,6 +123,7 @@ pub fn tls_collect_keyread_histogram_vec(cmd: &str, count: f64) {
 
 pub fn tls_collect_write_req_info(
     region_id: u64,
+    peer: &metapb::Peer,
     mut req_info: RequestInfo,
     write_size: usize,
 ) {
@@ -132,6 +134,6 @@ pub fn tls_collect_write_req_info(
         let mut m = m.borrow_mut();
         req_info.bytes = write_size;
         req_info.keys = 1;
-        m.local_write_stats.add_write_req_info(region_id, req_info);
+        m.local_write_stats.add_req_info(region_id, peer, req_info);
     });
 }

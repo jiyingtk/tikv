@@ -195,7 +195,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
             if let Ok(key) = m.key().to_owned().into_raw() {
                 req_info = build_req_info(&key, &key, false);
             }
-            
+
             let mut secondaries = &self.secondary_keys.as_ref().map(|_| vec![]);
 
             if Some(m.key()) == async_commit_pk.as_ref() {
@@ -224,7 +224,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(region_id, req_info, txn.write_size() - prev_write_size);
+            tls_collect_write_req_info(region_id, ctx.get_peer(), req_info, txn.write_size() - prev_write_size);
         }
 
         context.statistics.add(&txn.take_statistics());

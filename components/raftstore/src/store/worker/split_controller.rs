@@ -122,6 +122,7 @@ where
 pub struct RegionInfo {
     pub sample_num: usize,
     pub qps: usize,
+    pub bytes: usize,
     pub peer: Peer,
     pub key_ranges: Vec<KeyRange>,
     pub req_infos: Vec<RequestInfo>,
@@ -132,6 +133,7 @@ impl RegionInfo {
         RegionInfo {
             sample_num,
             qps: 0,
+            bytes: 0,
             key_ranges: Vec::with_capacity(sample_num),
             peer: Peer::default(),
             req_infos: Vec::with_capacity(sample_num),
@@ -167,6 +169,7 @@ impl RegionInfo {
     fn add_req_infos(&mut self, req_infos: Vec<RequestInfo>) {
         self.qps += req_infos.len();
         for req_info in req_infos {
+            self.bytes += req_info.bytes;
             if self.req_infos.len() < self.sample_num {
                 self.req_infos.push(req_info);
             } else {
@@ -470,15 +473,6 @@ impl ReadStats {
             .or_insert_with(|| RegionInfo::new(num));
         region_info.update_peer(peer);
         region_info.add_key_ranges(key_ranges);
-    }
-
-    pub fn add_write_req_info(&mut self, region_id: u64, req_info: RequestInfo) {
-        let num = self.sample_num;
-        let region_info = self
-            .region_infos
-            .entry(region_id)
-            .or_insert_with(|| RegionInfo::new(num));
-        region_info.add_req_infos(vec![req_info]);
     }
 
     pub fn add_req_info(&mut self, region_id: u64, peer: &Peer, req_info: RequestInfo) {

@@ -926,23 +926,25 @@ where
     }
 
     fn handle_read_stats(&mut self, read_stats: ReadStats) {
-        for (region_id, stats) in &read_stats.flows {
-            let peer_stat = self
-                .region_peers
-                .entry(*region_id)
-                .or_insert_with(PeerStat::default);
-            peer_stat.read_bytes += stats.read_bytes as u64;
-            // peer_stat.read_keys += stats.read_keys as u64;
-            self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
-            // self.store_stat.engine_total_keys_read += stats.read_keys as u64;
-        }
+        // for (region_id, stats) in &read_stats.flows {
+        //     let peer_stat = self
+        //         .region_peers
+        //         .entry(*region_id)
+        //         .or_insert_with(PeerStat::default);
+        //     peer_stat.read_bytes += stats.read_bytes as u64;
+        //     // peer_stat.read_keys += stats.read_keys as u64;
+        //     self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
+        //     // self.store_stat.engine_total_keys_read += stats.read_keys as u64;
+        // }
         for (region_id, region_info) in &read_stats.region_infos {
             let peer_stat = self
                 .region_peers
                 .entry(*region_id)
                 .or_insert_with(PeerStat::default);
             peer_stat.read_keys += region_info.qps as u64;
+            peer_stat.read_bytes += region_info.bytes as u64;
             self.store_stat.engine_total_keys_read += region_info.qps as u64;
+            self.store_stat.engine_total_bytes_read += region_info.bytes as u64;
         }
 
         if !read_stats.region_infos.is_empty() {
