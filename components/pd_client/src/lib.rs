@@ -51,6 +51,8 @@ pub struct RegionStat {
     pub written_keys: u64,
     pub read_bytes: u64,
     pub read_keys: u64,
+    pub ops: u64,
+    pub bytes: u64,
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub last_report_ts: UnixSecs,

@@ -162,6 +162,11 @@ pub struct StoreStat {
     pub store_cpu_usages: RecordPairVec,
     pub store_read_io_rates: RecordPairVec,
     pub store_write_io_rates: RecordPairVec,
+
+    pub store_ops: u64,
+    pub store_bytes: u64,
+    pub store_last_ops: u64,
+    pub store_last_bytes: u64,
 }
 
 impl Default for StoreStat {
@@ -181,6 +186,11 @@ impl Default for StoreStat {
             store_cpu_usages: RecordPairVec::default(),
             store_read_io_rates: RecordPairVec::default(),
             store_write_io_rates: RecordPairVec::default(),
+
+            store_ops: 0,
+            store_bytes: 0,
+            store_last_ops: 0,
+            store_last_bytes: 0,
         }
     }
 }
@@ -193,6 +203,10 @@ pub struct PeerStat {
     pub last_read_keys: u64,
     pub last_written_bytes: u64,
     pub last_written_keys: u64,
+    pub ops: u64,
+    pub bytes: u64,
+    pub last_ops: u64,
+    pub last_bytes: u64,
     pub last_report_ts: UnixSecs,
 }
 
@@ -703,6 +717,12 @@ where
         stats.set_keys_read(
             self.store_stat.engine_total_keys_read - self.store_stat.engine_last_total_keys_read,
         );
+        stats.set_ops(
+            self.store_stat.store_ops - self.store_stat.store_last_ops
+        );
+        stats.set_bytes(
+            self.store_stat.store_bytes - self.store_stat.store_last_bytes
+        );
 
         stats.set_cpu_usages(self.store_stat.store_cpu_usages.clone().into());
         stats.set_read_io_rates(self.store_stat.store_read_io_rates.clone().into());
@@ -713,6 +733,8 @@ where
         stats.set_interval(interval);
         self.store_stat.engine_last_total_bytes_read = self.store_stat.engine_total_bytes_read;
         self.store_stat.engine_last_total_keys_read = self.store_stat.engine_total_keys_read;
+        self.store_stat.store_last_ops = self.store_stat.store_ops;
+        self.store_stat.store_last_bytes = self.store_stat.store_bytes;
         self.store_stat.last_report_ts = UnixSecs::now();
         self.store_stat.region_bytes_written.flush();
         self.store_stat.region_keys_written.flush();
@@ -926,25 +948,25 @@ where
     }
 
     fn handle_read_stats(&mut self, read_stats: ReadStats) {
-        // for (region_id, stats) in &read_stats.flows {
-        //     let peer_stat = self
-        //         .region_peers
-        //         .entry(*region_id)
-        //         .or_insert_with(PeerStat::default);
-        //     peer_stat.read_bytes += stats.read_bytes as u64;
-        //     // peer_stat.read_keys += stats.read_keys as u64;
-        //     self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
-        //     // self.store_stat.engine_total_keys_read += stats.read_keys as u64;
-        // }
+        for (region_id, stats) in &read_stats.flows {
+            let peer_stat = self
+                .region_peers
+                .entry(*region_id)
+                .or_insert_with(PeerStat::default);
+            peer_stat.read_bytes += stats.read_bytes as u64;
+            peer_stat.read_keys += stats.read_keys as u64;
+            self.store_stat.engine_total_bytes_read += stats.read_bytes as u64;
+            self.store_stat.engine_total_keys_read += stats.read_keys as u64;
+        }
         for (region_id, region_info) in &read_stats.region_infos {
             let peer_stat = self
                 .region_peers
                 .entry(*region_id)
                 .or_insert_with(PeerStat::default);
-            peer_stat.read_keys += region_info.qps as u64;
-            peer_stat.read_bytes += region_info.bytes as u64;
-            self.store_stat.engine_total_keys_read += region_info.qps as u64;
-            self.store_stat.engine_total_bytes_read += region_info.bytes as u64;
+            peer_stat.ops += region_info.qps as u64;
+            peer_stat.bytes += region_info.bytes as u64;
+            self.store_stat.store_ops += region_info.qps as u64;
+            self.store_stat.store_bytes += region_info.bytes as u64;
         }
 
         if !read_stats.region_infos.is_empty() {
@@ -1115,6 +1137,8 @@ where
                     read_keys_delta,
                     written_bytes_delta,
                     written_keys_delta,
+                    ops_delta,
+                    bytes_delta,
                     last_report_ts,
                 ) = {
                     let peer_stat = self
@@ -1125,11 +1149,15 @@ where
                     let read_keys_delta = peer_stat.read_keys - peer_stat.last_read_keys;
                     let written_bytes_delta = written_bytes - peer_stat.last_written_bytes;
                     let written_keys_delta = written_keys - peer_stat.last_written_keys;
+                    let ops_delta = peer_stat.ops - peer_stat.last_ops;
+                    let bytes_delta = peer_stat.bytes - peer_stat.last_bytes;
                     let mut last_report_ts = peer_stat.last_report_ts;
                     peer_stat.last_written_bytes = written_bytes;
                     peer_stat.last_written_keys = written_keys;
                     peer_stat.last_read_bytes = peer_stat.read_bytes;
                     peer_stat.last_read_keys = peer_stat.read_keys;
+                    peer_stat.last_ops = peer_stat.ops;
+                    peer_stat.last_bytes = peer_stat.bytes;
                     peer_stat.last_report_ts = UnixSecs::now();
                     if last_report_ts.is_zero() {
                         last_report_ts = self.start_ts;
@@ -1139,6 +1167,8 @@ where
                         read_keys_delta,
                         written_bytes_delta,
                         written_keys_delta,
+                        ops_delta,
+                        bytes_delta,
                         last_report_ts,
                     )
                 };
@@ -1153,6 +1183,8 @@ where
                         written_keys: written_keys_delta,
                         read_bytes: read_bytes_delta,
                         read_keys: read_keys_delta,
+                        ops: ops_delta,
+                        bytes: bytes_delta,
                         approximate_size,
                         approximate_keys,
                         last_report_ts,
