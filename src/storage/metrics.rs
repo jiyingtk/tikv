@@ -17,6 +17,7 @@ use tikv_util::collections::HashMap;
 struct StorageLocalMetrics {
     local_scan_details: HashMap<CommandKind, Statistics>,
     local_read_stats: ReadStats,
+    local_write_stats: ReadStats,
 }
 
 thread_local! {
@@ -24,6 +25,7 @@ thread_local! {
         StorageLocalMetrics {
             local_scan_details: HashMap::default(),
             local_read_stats:ReadStats::default(),
+            local_write_stats:ReadStats::default(),
         }
     );
 }
@@ -49,6 +51,11 @@ pub fn tls_flush<R: FlowStatsReporter>(reporter: &R) {
             let mut read_stats = ReadStats::default();
             mem::swap(&mut read_stats, &mut m.local_read_stats);
             reporter.report_read_stats(read_stats);
+        }
+        if !m.local_write_stats.is_empty() {
+            let mut write_stats = ReadStats::default();
+            mem::swap(&mut write_stats, &mut m.local_write_stats);
+            reporter.report_write_stats(write_stats);
         }
     });
 }
@@ -127,6 +134,23 @@ pub fn tls_collect_req_info_batch(region_id: u64, peer: &metapb::Peer, mut req_i
         }
         m.local_read_stats
             .add_req_info_batch(region_id, peer, req_infos);
+    });
+}
+
+pub fn tls_collect_write_req_info(
+    region_id: u64,
+    peer: &metapb::Peer,
+    mut req_info: RequestInfo,
+    write_size: usize,
+) {
+    TLS_STORAGE_METRICS.with(|m| {
+        if req_info.start_key.is_empty() && req_info.end_key.is_empty() {
+            return;
+        }
+        let mut m = m.borrow_mut();
+        req_info.bytes = write_size;
+        req_info.keys = 1;
+        m.local_write_stats.add_req_info(region_id, peer, req_info);
     });
 }
 

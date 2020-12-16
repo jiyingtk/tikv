@@ -839,7 +839,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority_tag = get_priority_tag(priority);
         let res = self.read_pool.spawn_handle(
             async move {
-                let mut req_infos = vec![];
                 // for get in &gets {
                 //     let key = get.key.to_owned();
                 //     let region_id = get.get_context().get_region_id();
@@ -990,6 +989,9 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
     ) -> Result<()> {
         check_key_size!(Some(&key).into_iter(), self.max_key_size, callback);
 
+        let kv_size = key.len() + value.len();
+        let req_info = build_req_info(&key, &key, false);
+
         self.engine.async_write(
             &ctx,
             WriteData::from_modifies(vec![Modify::Put(
@@ -999,6 +1001,9 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             )]),
             Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
+
+        tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
+
         KV_COMMAND_COUNTER_VEC_STATIC.raw_put.inc();
         Ok(())
     }
@@ -1018,6 +1023,12 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             self.max_key_size,
             callback
         );
+
+        for (key, value) in &pairs {
+            let req_info = build_req_info(&key, &key, false);
+            let kv_size = key.len() + value.len();
+            tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
+        }
 
         let modifies = pairs
             .into_iter()
