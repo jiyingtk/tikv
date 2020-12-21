@@ -117,10 +117,6 @@ impl Statistics {
         self.lock.total_op_count() + self.write.total_op_count() + self.data.total_op_count()
     }
 
-    pub fn total_processed(&self) -> usize {
-        self.lock.processed + self.write.processed + self.data.processed
-    }
-
     pub fn total_read_bytes(&self) -> usize {
         let mut total: usize = 0;
         total = total.saturating_add(self.write.flow_stats.read_bytes);

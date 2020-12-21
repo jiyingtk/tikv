@@ -177,8 +177,8 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let sched = TxnScheduler::new(
             engine.clone(),
             lock_mgr,
-            concurrency_manager.clone(),
             reporter,
+            concurrency_manager.clone(),
             config.scheduler_concurrency,
             config.scheduler_worker_pool_size,
             config.scheduler_pending_write_threshold.0 as usize,
@@ -386,6 +386,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             fill_cache,
                             bypass_locks,
                             region_id,
+                            ctx,
                         )));
                     }
                     Self::with_tls_engine(|engine| engine.release_snapshot());
@@ -398,6 +399,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             fill_cache,
                             bypass_locks,
                             region_id,
+                            ctx,
                         ) = match req_snap {
                             Ok(req_snap) => req_snap,
                             Err(e) => {
@@ -415,7 +417,10 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                                     .build()
                                 {
                                     Ok(mut point_getter) => {
-                                        let req_info = build_req_info(&key, &key, false);
+                                        let mut req_info = RequestInfo::default();
+                                        if let Ok(k) = key.to_owned().into_raw() {
+                                            req_info = build_req_info(&k, &k, false);
+                                        }
                                         let v = point_getter.get(&key);
                                         let stat = point_getter.take_statistics();
                                         metrics::tls_collect_read_flow(region_id, &stat);

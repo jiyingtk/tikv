@@ -1,5 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use raftstore::store::RequestInfo;
+use raftstore::store::util::build_req_info;
 use txn_types::{Key, TimeStamp};
 
 use crate::storage::kv::WriteData;
@@ -9,6 +11,7 @@ use crate::storage::txn::commands::{
     Command, CommandExt, TypedCommand, WriteCommand, WriteContext, WriteResult,
 };
 use crate::storage::txn::{Error, ErrorInner, Result};
+use crate::storage::txn::sched_pool::tls_collect_write_req_info;
 use crate::storage::{
     Error as StorageError, ErrorInner as StorageErrorInner, PessimisticLockRes, ProcessResult,
     Result as StorageResult, Snapshot,
@@ -109,7 +112,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock 
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(region_id, ctx.get_peer(), req_info, txn.write_size() - prev_write_size);
+            tls_collect_write_req_info(1, ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //should use correct region_id
         }
 
         context.statistics.add(&txn.take_statistics());

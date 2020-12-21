@@ -1,6 +1,8 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use engine_traits::CF_WRITE;
+use raftstore::store::RequestInfo;
+use raftstore::store::util::build_req_info;
 use txn_types::{Key, Mutation, TimeStamp};
 
 use crate::storage::kv::WriteData;
@@ -10,6 +12,7 @@ use crate::storage::mvcc::{
 };
 use crate::storage::txn::commands::{WriteCommand, WriteContext, WriteResult};
 use crate::storage::txn::{Error, ErrorInner, Result};
+use crate::storage::txn::sched_pool::tls_collect_write_req_info;
 use crate::storage::{
     txn::commands::{Command, CommandExt, TypedCommand},
     types::PrewriteResult,
@@ -224,7 +227,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(region_id, ctx.get_peer(), req_info, txn.write_size() - prev_write_size);
+            tls_collect_write_req_info(1, self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //use correct region_id
         }
 
         context.statistics.add(&txn.take_statistics());

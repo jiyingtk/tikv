@@ -1,5 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use raftstore::store::RequestInfo;
+use raftstore::store::util::build_req_info;
 use txn_types::Key;
 
 use crate::storage::kv::WriteData;
@@ -9,6 +11,7 @@ use crate::storage::txn::commands::{
     Command, CommandExt, ReleasedLocks, TypedCommand, WriteCommand, WriteContext, WriteResult,
 };
 use crate::storage::txn::{Error, ErrorInner, Result};
+use crate::storage::txn::sched_pool::tls_collect_write_req_info;
 use crate::storage::{ProcessResult, Snapshot, TxnStatus};
 
 command! {
@@ -61,7 +64,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Commit {
                 req_info = build_req_info(&key, &key, false);
             }
             released_locks.push(txn.commit(k, self.commit_ts)?);
-            tls_collect_write_req_info(region_id, self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);
+            tls_collect_write_req_info(1, self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);   //use correct region_id
         }
         released_locks.wake_up(context.lock_mgr);
 
