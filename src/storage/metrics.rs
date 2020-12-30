@@ -5,6 +5,8 @@ use prometheus_static_metric::*;
 
 use std::cell::RefCell;
 use std::mem;
+use std::time::Instant;
+use std::sync::mpsc::Sender;
 
 use crate::server::metrics::{GcKeysCF as ServerGcKeysCF, GcKeysDetail as ServerGcKeysDetail};
 use crate::storage::kv::{FlowStatsReporter, Statistics};
@@ -18,6 +20,7 @@ struct StorageLocalMetrics {
     local_scan_details: HashMap<CommandKind, Statistics>,
     local_read_stats: ReadStats,
     local_write_stats: ReadStats,
+    local_last_update_write_time: Instant,
 }
 
 thread_local! {
@@ -25,7 +28,8 @@ thread_local! {
         StorageLocalMetrics {
             local_scan_details: HashMap::default(),
             local_read_stats:ReadStats::default(),
-            local_write_stats:ReadStats::default(),
+            local_write_stats:ReadStats::default_write(),
+            local_last_update_write_time: Instant::now(),
         }
     );
 }
@@ -52,11 +56,18 @@ pub fn tls_flush<R: FlowStatsReporter>(reporter: &R) {
             mem::swap(&mut read_stats, &mut m.local_read_stats);
             reporter.report_read_stats(read_stats);
         }
-        if !m.local_write_stats.is_empty() {
-            let mut write_stats = ReadStats::default();
-            mem::swap(&mut write_stats, &mut m.local_write_stats);
-            reporter.report_write_stats(write_stats);
-        }
+    });
+}
+
+pub fn tls_flush_write<R: FlowStatsReporter>(reporter: &Option<R>, write_stats: ReadStats) {
+    TLS_STORAGE_METRICS.with(|m| {
+        match reporter {
+            Some(rep) => {
+                rep.report_write_stats(write_stats);
+            }
+            None => {}
+        };
+        
     });
 }
 
@@ -138,6 +149,7 @@ pub fn tls_collect_req_info_batch(region_id: u64, peer: &metapb::Peer, mut req_i
 }
 
 pub fn tls_collect_write_req_info(
+    sender: &Option<Sender<ReadStats>>,
     region_id: u64,
     peer: &metapb::Peer,
     mut req_info: RequestInfo,
@@ -151,6 +163,17 @@ pub fn tls_collect_write_req_info(
         req_info.bytes = write_size;
         req_info.keys = 1;
         m.local_write_stats.add_req_info(region_id, peer, req_info);
+
+        if (Instant::now() - m.local_last_update_write_time).as_millis() > 1000 {
+            let mut write_stats = ReadStats::default_write();
+            mem::swap(&mut write_stats, &mut m.local_write_stats);
+            if let Some(s) = sender {
+                if s.send(write_stats).is_err() {
+                    warn!("send write_stats failed, are we shutting down?")
+                }
+            }
+            m.local_last_update_write_time = Instant::now();
+        }
     });
 }
 

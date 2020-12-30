@@ -30,7 +30,7 @@ thread_local! {
             processing_read_duration: SCHED_PROCESSING_READ_HISTOGRAM_VEC.local(),
             processing_write_duration: SCHED_PROCESSING_WRITE_HISTOGRAM_VEC.local(),
             command_keyread_histogram_vec: KV_COMMAND_KEYREAD_HISTOGRAM_VEC.local(),
-            local_write_stats:ReadStats::default(),
+            local_write_stats:ReadStats::default_write(),
         }
     );
 }
@@ -93,7 +93,7 @@ pub fn tls_flush<R: FlowStatsReporter>(reporter: &Option<R>) {
         if !m.local_write_stats.is_empty() {
             match reporter {
                 Some(rep) => {
-                    let mut read_stats = ReadStats::default();
+                    let mut read_stats = ReadStats::default_write();
                     mem::swap(&mut read_stats, &mut m.local_write_stats);
                     rep.report_write_stats(read_stats);
                 }

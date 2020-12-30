@@ -52,12 +52,16 @@ use raftstore::store::PdTask;
 use raftstore::store::RequestInfo;
 use raftstore::store::util::build_req_info;
 use raftstore::store::util::build_key_range;
+use raftstore::store::ReadStats;
 use rand::prelude::*;
 use std::{
     borrow::Cow,
     iter,
     sync::{atomic, Arc},
 };
+use std::sync::mpsc::{self, Sender};
+use std::thread::{Builder, JoinHandle};
+use std::time::Duration;
 use tikv_util::time::Instant;
 use tikv_util::time::ThreadReadId;
 use tikv_util::worker::FutureScheduler;
@@ -108,6 +112,10 @@ pub struct Storage<E: Engine, L: LockManager> {
 
     // Fields below are storage configurations.
     max_key_size: usize,
+
+    timer: Option<Sender<bool>>,
+    sender: Option<Sender<ReadStats>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl<E: Engine, L: LockManager> Clone for Storage<E, L> {
@@ -127,6 +135,9 @@ impl<E: Engine, L: LockManager> Clone for Storage<E, L> {
             max_key_size: self.max_key_size,
             concurrency_manager: self.concurrency_manager.clone(),
             enable_async_commit: self.enable_async_commit,
+            timer: None,
+            sender: self.sender.clone(),
+            handle: None,
         }
     }
 }
@@ -142,6 +153,14 @@ impl<E: Engine, L: LockManager> Drop for Storage<E, L> {
 
         if refs != 1 {
             return;
+        }
+
+        if let Some(h) = self.handle.take() {
+            drop(self.timer.take());
+            drop(self.sender.take());
+            if let Err(e) = h.join() {
+                error!("join write-info-push failed"; "err" => ?e);
+            }
         }
 
         info!("Storage stopped.");
@@ -177,7 +196,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let sched = TxnScheduler::new(
             engine.clone(),
             lock_mgr,
-            reporter,
+            reporter.clone(),
             concurrency_manager.clone(),
             config.scheduler_concurrency,
             config.scheduler_worker_pool_size,
@@ -188,6 +207,22 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
 
         info!("Storage started.");
 
+        let (tx, rx) = mpsc::channel();
+
+        let (sender, receiver) = mpsc::channel();
+        let collect_interval = Duration::from_secs(1);
+        let h = Builder::new()
+            .name(thd_name!("write-info-push"))
+            .spawn(move || {
+                tikv_alloc::add_thread_memory_accessor();
+                while let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(collect_interval) {
+                    while let Ok(stats) = receiver.try_recv() {
+                        tls_flush_write(&reporter, stats);
+                    }
+                }
+                tikv_alloc::remove_thread_memory_accessor();
+            })?;
+
         Ok(Storage {
             engine,
             sched,
@@ -196,6 +231,9 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             refs: Arc::new(atomic::AtomicUsize::new(1)),
             max_key_size: config.max_key_size,
             enable_async_commit: config.enable_async_commit,
+            timer: Some(tx),
+            sender: Some(sender),
+            handle: Some(h),
         })
     }
 
@@ -1007,7 +1045,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
 
-        tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
+        tls_collect_write_req_info(&self.sender, ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
 
         KV_COMMAND_COUNTER_VEC_STATIC.raw_put.inc();
         Ok(())
@@ -1032,7 +1070,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         for (key, value) in &pairs {
             let req_info = build_req_info(&key, &key, false);
             let kv_size = key.len() + value.len();
-            tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
+            tls_collect_write_req_info(&self.sender, ctx.get_region_id(), ctx.get_peer(), req_info, kv_size);
         }
 
         let modifies = pairs

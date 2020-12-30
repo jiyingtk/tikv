@@ -163,10 +163,10 @@ pub struct StoreStat {
     pub store_read_io_rates: RecordPairVec,
     pub store_write_io_rates: RecordPairVec,
 
-    pub store_ops: u64,
-    pub store_bytes: u64,
-    pub store_last_ops: u64,
-    pub store_last_bytes: u64,
+    pub store_read_ops: u64,
+    pub store_write_ops: u64,
+    pub store_last_read_ops: u64,
+    pub store_last_write_ops: u64,
 }
 
 impl Default for StoreStat {
@@ -187,10 +187,10 @@ impl Default for StoreStat {
             store_read_io_rates: RecordPairVec::default(),
             store_write_io_rates: RecordPairVec::default(),
 
-            store_ops: 0,
-            store_bytes: 0,
-            store_last_ops: 0,
-            store_last_bytes: 0,
+            store_read_ops: 0,
+            store_write_ops: 0,
+            store_last_read_ops: 0,
+            store_last_write_ops: 0,
         }
     }
 }
@@ -203,10 +203,10 @@ pub struct PeerStat {
     pub last_read_keys: u64,
     pub last_written_bytes: u64,
     pub last_written_keys: u64,
-    pub ops: u64,
-    pub bytes: u64,
-    pub last_ops: u64,
-    pub last_bytes: u64,
+    pub read_ops: u64,
+    pub write_ops: u64,
+    pub last_read_ops: u64,
+    pub last_write_ops: u64,
     pub last_report_ts: UnixSecs,
 }
 
@@ -718,10 +718,10 @@ where
             self.store_stat.engine_total_keys_read - self.store_stat.engine_last_total_keys_read,
         );
         stats.set_ops(
-            self.store_stat.store_ops - self.store_stat.store_last_ops
+            self.store_stat.store_read_ops - self.store_stat.store_last_read_ops
         );
-        stats.set_bytes(
-            self.store_stat.store_bytes - self.store_stat.store_last_bytes
+        stats.set_ops_w(
+            self.store_stat.store_write_ops - self.store_stat.store_last_write_ops
         );
 
         stats.set_cpu_usages(self.store_stat.store_cpu_usages.clone().into());
@@ -733,8 +733,8 @@ where
         stats.set_interval(interval);
         self.store_stat.engine_last_total_bytes_read = self.store_stat.engine_total_bytes_read;
         self.store_stat.engine_last_total_keys_read = self.store_stat.engine_total_keys_read;
-        self.store_stat.store_last_ops = self.store_stat.store_ops;
-        self.store_stat.store_last_bytes = self.store_stat.store_bytes;
+        self.store_stat.store_last_read_ops = self.store_stat.store_read_ops;
+        self.store_stat.store_last_write_ops = self.store_stat.store_write_ops;
         self.store_stat.last_report_ts = UnixSecs::now();
         self.store_stat.region_bytes_written.flush();
         self.store_stat.region_keys_written.flush();
@@ -909,12 +909,17 @@ where
                         let mut split_maps = ratio_split_maps.lock().unwrap();
                         if !split_maps.contains_key(&region_id) {
                             let opts = split_region.get_opts();
-                            let split_info = RatioSplitInfo {
-                                dim_id: opts[0] as u64,
-                                ratio: opts[1],
-                            };
-                            split_maps.insert(region_id, split_info);
-                            info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
+                            if opts.len() != 3 {
+                                info!("receive invalid split info option!"; "region_id" => region_id);
+                            } else {
+                                let split_info = RatioSplitInfo {
+                                    dim_id: opts[0] as u64,
+                                    ratio: opts[1],
+                                    rw_type: opts[2] as u64,
+                                };
+                                split_maps.insert(region_id, split_info);
+                                info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
+                            }
                         }
                     } else {
                         if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
@@ -963,10 +968,13 @@ where
                 .region_peers
                 .entry(*region_id)
                 .or_insert_with(PeerStat::default);
-            peer_stat.ops += region_info.qps as u64;
-            peer_stat.bytes += region_info.bytes as u64;
-            self.store_stat.store_ops += region_info.qps as u64;
-            self.store_stat.store_bytes += region_info.bytes as u64;
+            if read_stats.rw_type == 0 {
+                peer_stat.read_ops += region_info.qps as u64;
+                self.store_stat.store_read_ops += region_info.qps as u64;
+            } else {
+                peer_stat.write_ops += region_info.qps as u64;
+                self.store_stat.store_write_ops += region_info.qps as u64;
+            }
         }
 
         if !read_stats.region_infos.is_empty() {
@@ -1137,8 +1145,8 @@ where
                     read_keys_delta,
                     written_bytes_delta,
                     written_keys_delta,
-                    ops_delta,
-                    bytes_delta,
+                    read_ops_delta,
+                    write_ops_delta,
                     last_report_ts,
                 ) = {
                     let peer_stat = self
@@ -1149,15 +1157,15 @@ where
                     let read_keys_delta = peer_stat.read_keys - peer_stat.last_read_keys;
                     let written_bytes_delta = written_bytes - peer_stat.last_written_bytes;
                     let written_keys_delta = written_keys - peer_stat.last_written_keys;
-                    let ops_delta = peer_stat.ops - peer_stat.last_ops;
-                    let bytes_delta = peer_stat.bytes - peer_stat.last_bytes;
+                    let read_ops_delta = peer_stat.read_ops - peer_stat.last_read_ops;
+                    let write_ops_delta = peer_stat.write_ops - peer_stat.last_write_ops;
                     let mut last_report_ts = peer_stat.last_report_ts;
                     peer_stat.last_written_bytes = written_bytes;
                     peer_stat.last_written_keys = written_keys;
                     peer_stat.last_read_bytes = peer_stat.read_bytes;
                     peer_stat.last_read_keys = peer_stat.read_keys;
-                    peer_stat.last_ops = peer_stat.ops;
-                    peer_stat.last_bytes = peer_stat.bytes;
+                    peer_stat.last_read_ops = peer_stat.read_ops;
+                    peer_stat.last_write_ops = peer_stat.write_ops;
                     peer_stat.last_report_ts = UnixSecs::now();
                     if last_report_ts.is_zero() {
                         last_report_ts = self.start_ts;
@@ -1167,8 +1175,8 @@ where
                         read_keys_delta,
                         written_bytes_delta,
                         written_keys_delta,
-                        ops_delta,
-                        bytes_delta,
+                        read_ops_delta,
+                        write_ops_delta,
                         last_report_ts,
                     )
                 };
@@ -1183,8 +1191,8 @@ where
                         written_keys: written_keys_delta,
                         read_bytes: read_bytes_delta,
                         read_keys: read_keys_delta,
-                        ops: ops_delta,
-                        bytes: bytes_delta,
+                        read_ops: read_ops_delta,
+                        write_ops: write_ops_delta,
                         approximate_size,
                         approximate_keys,
                         last_report_ts,

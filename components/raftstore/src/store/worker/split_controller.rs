@@ -27,6 +27,7 @@ pub struct RatioSplitInfo
 {
     pub dim_id: u64,
     pub ratio: f64,
+    pub rw_type: u64, // 0 => read, other => write
 }
 
 #[derive(Default, Debug, Clone)]
@@ -450,6 +451,7 @@ pub struct ReadStats {
     pub flows: HashMap<u64, FlowStatistics>,
     pub region_infos: HashMap<u64, RegionInfo>,
     pub sample_num: usize,
+    pub rw_type: u64,
 }
 
 impl ReadStats {
@@ -458,6 +460,16 @@ impl ReadStats {
             sample_num: DEFAULT_SAMPLE_NUM,
             region_infos: HashMap::default(),
             flows: HashMap::default(),
+            rw_type: 0,
+        }
+    }
+
+    pub fn default_write() -> ReadStats {
+        ReadStats {
+            sample_num: DEFAULT_SAMPLE_NUM,
+            region_infos: HashMap::default(),
+            flows: HashMap::default(),
+            rw_type: 1,
         }
     }
 
@@ -595,10 +607,13 @@ impl AutoSplitController {
         for other in others {
             for (region_id, region_info) in other.region_infos {
                 if split_maps.contains_key(&region_id) {
-                    let region_infos = region_infos_map
-                        .entry(region_id)
-                        .or_insert_with(|| Vec::with_capacity(capacity));
-                    region_infos.push(region_info);
+                    let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::default());
+                    if ratio_split_info.rw_type == other.rw_type {
+                        let region_infos = region_infos_map
+                            .entry(region_id)
+                            .or_insert_with(|| Vec::with_capacity(capacity));
+                        region_infos.push(region_info);
+                    }
                 }
             }
         }
