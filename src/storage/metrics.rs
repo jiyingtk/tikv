@@ -60,7 +60,7 @@ pub fn tls_flush<R: FlowStatsReporter>(reporter: &R) {
 }
 
 pub fn tls_flush_write<R: FlowStatsReporter>(reporter: &Option<R>, write_stats: ReadStats) {
-    TLS_STORAGE_METRICS.with(|m| {
+    TLS_STORAGE_METRICS.with(|| {
         match reporter {
             Some(rep) => {
                 rep.report_write_stats(write_stats);

@@ -1110,7 +1110,7 @@ where
                                 scheduler.clone(),
                                 pd_client.clone(),
                                 region,
-                                vec![split_info.split_key],
+                                split_info.split_keys,
                                 split_info.peer,
                                 true,
                                 Callback::None,

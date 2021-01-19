@@ -50,7 +50,7 @@ impl RequestInfo {
 
 pub struct SplitInfo {
     pub region_id: u64,
-    pub split_key: Vec<u8>,
+    pub split_keys: Vec<Vec<u8>>,
     pub peer: Peer,
 }
 
@@ -336,7 +336,7 @@ impl Recorder {
                 break;
             }
         }
-        info!("choose_middle in ratio based splitting"; "split_key" => format!("{:?}", &target_key), "contained candidate ranges" => contained_num);
+        info!("choose_middle in ratio based splitting"; "split_key" => format!("{:?}", hex::encode_upper(&target_key)), "contained candidate ranges" => contained_num);
 
         target_key.clone()
     }
@@ -580,7 +580,7 @@ impl AutoSplitController {
                     if !key.is_empty() {
                         let split_info = SplitInfo {
                             region_id,
-                            split_key: Key::from_raw(&key).into_encoded(),
+                            split_keys: vec![Key::from_raw(&key).into_encoded()],
                             peer: recorder.peer.clone(),
                         };
                         split_infos.push(split_info);
@@ -638,17 +638,18 @@ impl AutoSplitController {
                 recorder.record_req_infos(req_infos);
 
                 if recorder.is_ready() {
-                    let keys = recorder.ratio_split(&self.cfg, ratio_split_info);
-                    if !keys.is_empty() {
-                        let split_keys: Vec<Vec<u8>> = keys.iter().map(|key| Key::from_raw(&key).into_encoded()).collect();
-                        for split_key in split_keys {
-                            let split_info = SplitInfo {
-                                region_id,
-                                split_key,
-                                peer: recorder.peer.clone(),
-                            };
-                            split_infos.push(split_info);
+                    let split_keys = recorder.ratio_split(&self.cfg, ratio_split_info);
+                    if !split_keys.is_empty() {
+                        // let split_keys: Vec<Vec<u8>> = keys.iter().map(|key| Key::from_raw(&key).into_encoded()).collect();
+                        for split_key in &split_keys {
+                            info!("ratio split region";"region_id"=>region_id, "split_key"=>format!("{:?}", hex::encode_upper(&split_key)));
                         }
+                        let split_info = SplitInfo {
+                            region_id,
+                            split_keys,
+                            peer: recorder.peer.clone(),
+                        };
+                        split_infos.push(split_info);
                         split_maps.remove(&region_id);
                         info!("ratio split region: success";"region_id"=>region_id);
                     } else {
