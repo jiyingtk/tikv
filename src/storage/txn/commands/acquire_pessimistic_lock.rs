@@ -112,7 +112,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock 
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(1, ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //should use correct region_id
+            tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //should use correct region_id
         }
 
         context.statistics.add(&txn.take_statistics());

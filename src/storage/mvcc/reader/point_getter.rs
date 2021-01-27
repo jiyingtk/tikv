@@ -318,6 +318,7 @@ impl<S: Snapshot> PointGetter<S> {
 
         if let Some(value) = value {
             self.statistics.data.processed_keys += 1;
+            self.statistics.data.flow_stats.read_bytes += value.len();
             Ok(value)
         } else {
             Err(default_not_found_error(

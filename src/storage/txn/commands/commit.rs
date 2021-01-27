@@ -64,7 +64,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Commit {
                 req_info = build_req_info(&key, &key, false);
             }
             released_locks.push(txn.commit(k, self.commit_ts)?);
-            tls_collect_write_req_info(1, self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);   //use correct region_id
+            tls_collect_write_req_info(self.ctx.get_region_id(), self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);   //use correct region_id
         }
         released_locks.wake_up(context.lock_mgr);
 
