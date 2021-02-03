@@ -88,6 +88,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock 
         };
         for (k, should_not_exist) in keys {
             let prev_write_size = txn.write_size();
+            let prev_write_keys = txn.write_keys();
             let mut req_info = RequestInfo::default();
             if let Ok(key) = k.to_owned().into_raw() {
                 req_info = build_req_info(&key, &key, false);
@@ -112,7 +113,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock 
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //should use correct region_id
+            tls_collect_write_req_info(ctx.get_region_id(), ctx.get_peer(), req_info, txn.write_size() - prev_write_size, txn.write_keys() - prev_write_keys);    //should use correct region_id
         }
 
         context.statistics.add(&txn.take_statistics());

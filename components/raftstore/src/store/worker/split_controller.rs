@@ -5,6 +5,7 @@ use std::collections::BinaryHeap;
 use std::slice::Iter;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 use kvproto::kvrpcpb::KeyRange;
@@ -22,12 +23,23 @@ use crate::store::worker::{FlowStatistics, SplitConfig, SplitConfigManager};
 
 pub const TOP_N: usize = 10;
 
-#[derive(Default)]
 pub struct RatioSplitInfo
 {
     pub dim_id: u64,
     pub ratio: f64,
     pub rw_type: u64, // 0 => read, other => write
+    pub create_time: Instant,
+}
+
+impl RatioSplitInfo {
+    fn new() -> RatioSplitInfo {
+        RatioSplitInfo {
+            dim_id: 0,
+            ratio: 0.0,
+            rw_type: 0,
+            create_time: Instant::now(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -124,6 +136,7 @@ pub struct RegionInfo {
     pub sample_num: usize,
     pub qps: usize,
     pub bytes: usize,
+    pub keys: usize,
     pub peer: Peer,
     pub key_ranges: Vec<KeyRange>,
     pub req_infos: Vec<RequestInfo>,
@@ -135,6 +148,7 @@ impl RegionInfo {
             sample_num,
             qps: 0,
             bytes: 0,
+            keys: 0,
             key_ranges: Vec::with_capacity(sample_num),
             peer: Peer::default(),
             req_infos: Vec::with_capacity(sample_num),
@@ -171,6 +185,7 @@ impl RegionInfo {
         self.qps += req_infos.len();
         for req_info in req_infos {
             self.bytes += req_info.bytes;
+            self.keys += req_info.keys;
             if self.req_infos.len() < self.sample_num {
                 self.req_infos.push(req_info);
             } else {
@@ -607,7 +622,7 @@ impl AutoSplitController {
         for other in others {
             for (region_id, region_info) in other.region_infos {
                 if split_maps.contains_key(&region_id) {
-                    let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::default());
+                    let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::new());
                     if ratio_split_info.rw_type == other.rw_type {
                         let region_infos = region_infos_map
                             .entry(region_id)
@@ -621,7 +636,7 @@ impl AutoSplitController {
         for (region_id, region_infos) in region_infos_map {
             let num = self.cfg.detect_times;
             if split_maps.contains_key(&region_id) {
-                let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::default());
+                let ratio_split_info = split_maps.entry(region_id).or_insert_with(|| RatioSplitInfo::new());
 
                 let recorder = self
                     .recorders

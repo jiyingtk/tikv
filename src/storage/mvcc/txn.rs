@@ -107,6 +107,7 @@ pub struct MvccTxn<S: Snapshot> {
     pub(crate) reader: MvccReader<S>,
     start_ts: TimeStamp,
     write_size: usize,
+    write_keys: usize,
     writes: WriteData,
     // collapse continuous rollbacks.
     pub(crate) collapse_rollback: bool,
@@ -170,6 +171,7 @@ impl<S: Snapshot> MvccTxn<S> {
             reader,
             start_ts,
             write_size: 0,
+            write_keys: 0,
             writes: WriteData::default(),
             collapse_rollback: true,
             extra_op: ExtraOp::Noop,
@@ -208,9 +210,14 @@ impl<S: Snapshot> MvccTxn<S> {
         self.write_size
     }
 
+    pub fn write_keys(&self) -> usize {
+        self.write_keys
+    }
+
     pub(crate) fn put_lock(&mut self, key: Key, lock: &Lock) {
         let write = Modify::Put(CF_LOCK, key, lock.to_bytes());
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
     }
 
@@ -218,6 +225,7 @@ impl<S: Snapshot> MvccTxn<S> {
         let released = ReleasedLock::new(&key, pessimistic);
         let write = Modify::Delete(CF_LOCK, key);
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
         Some(released)
     }
@@ -225,24 +233,28 @@ impl<S: Snapshot> MvccTxn<S> {
     fn put_value(&mut self, key: Key, ts: TimeStamp, value: Value) {
         let write = Modify::Put(CF_DEFAULT, key.append_ts(ts), value);
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
     }
 
     fn delete_value(&mut self, key: Key, ts: TimeStamp) {
         let write = Modify::Delete(CF_DEFAULT, key.append_ts(ts));
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
     }
 
     pub(crate) fn put_write(&mut self, key: Key, ts: TimeStamp, value: Value) {
         let write = Modify::Put(CF_WRITE, key.append_ts(ts), value);
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
     }
 
     fn delete_write(&mut self, key: Key, ts: TimeStamp) {
         let write = Modify::Delete(CF_WRITE, key.append_ts(ts));
         self.write_size += write.size();
+        self.write_keys += 1;
         self.writes.modifies.push(write);
     }
 

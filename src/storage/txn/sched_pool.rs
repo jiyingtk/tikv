@@ -126,6 +126,7 @@ pub fn tls_collect_write_req_info(
     peer: &metapb::Peer,
     mut req_info: RequestInfo,
     write_size: usize,
+    write_keys: usize,
 ) {
     TLS_SCHED_METRICS.with(|m| {
         if req_info.start_key.is_empty() && req_info.end_key.is_empty() {
@@ -133,7 +134,7 @@ pub fn tls_collect_write_req_info(
         }
         let mut m = m.borrow_mut();
         req_info.bytes = write_size;
-        req_info.keys = 1;
+        req_info.keys = write_keys;
         m.local_write_stats.add_req_info(region_id, peer, req_info);
     });
 }

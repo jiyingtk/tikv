@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
+use std::time::Instant;
 use std::{cmp, io};
 
 use futures::future::TryFutureExt;
@@ -154,6 +155,11 @@ pub struct StoreStat {
     pub engine_last_total_keys_read: u64,
     pub last_report_ts: UnixSecs,
 
+    pub engine_total_bytes_write_leader: u64,
+    pub engine_total_keys_write_leader: u64,
+    pub engine_last_total_bytes_write_leader: u64,
+    pub engine_last_total_keys_write_leader: u64,
+
     pub region_bytes_read: LocalHistogram,
     pub region_keys_read: LocalHistogram,
     pub region_bytes_written: LocalHistogram,
@@ -183,6 +189,11 @@ impl Default for StoreStat {
             engine_last_total_bytes_read: 0,
             engine_last_total_keys_read: 0,
 
+            engine_total_bytes_write_leader: 0,
+            engine_total_keys_write_leader: 0,
+            engine_last_total_bytes_write_leader: 0,
+            engine_last_total_keys_write_leader: 0,
+
             store_cpu_usages: RecordPairVec::default(),
             store_read_io_rates: RecordPairVec::default(),
             store_write_io_rates: RecordPairVec::default(),
@@ -201,6 +212,8 @@ pub struct PeerStat {
     pub read_keys: u64,
     pub last_read_bytes: u64,
     pub last_read_keys: u64,
+    pub write_bytes: u64,
+    pub write_keys: u64,
     pub last_written_bytes: u64,
     pub last_written_keys: u64,
     pub read_ops: u64,
@@ -717,10 +730,16 @@ where
         stats.set_keys_read(
             self.store_stat.engine_total_keys_read - self.store_stat.engine_last_total_keys_read,
         );
-        stats.set_ops(
+        stats.set_leader_bytes_written(
+            self.store_stat.engine_total_bytes_write_leader - self.store_stat.engine_last_total_bytes_write_leader,
+        );
+        stats.set_leader_keys_written(
+            self.store_stat.engine_total_keys_write_leader - self.store_stat.engine_last_total_keys_write_leader,
+        );
+        stats.set_ops_read(
             self.store_stat.store_read_ops - self.store_stat.store_last_read_ops
         );
-        stats.set_ops_w(
+        stats.set_ops_write(
             self.store_stat.store_write_ops - self.store_stat.store_last_write_ops
         );
 
@@ -733,6 +752,8 @@ where
         stats.set_interval(interval);
         self.store_stat.engine_last_total_bytes_read = self.store_stat.engine_total_bytes_read;
         self.store_stat.engine_last_total_keys_read = self.store_stat.engine_total_keys_read;
+        self.store_stat.engine_last_total_bytes_write_leader = self.store_stat.engine_total_bytes_write_leader;
+        self.store_stat.engine_last_total_keys_write_leader = self.store_stat.engine_total_keys_write_leader;
         self.store_stat.store_last_read_ops = self.store_stat.store_read_ops;
         self.store_stat.store_last_write_ops = self.store_stat.store_write_ops;
         self.store_stat.last_report_ts = UnixSecs::now();
@@ -906,20 +927,19 @@ where
 
                     if split_region.get_policy() == pdpb::CheckPolicy::Ratio {
                         info!("receive ratio split request"; "region_id" => region_id);
-                        let mut split_maps = ratio_split_maps.lock().unwrap();
-                        if !split_maps.contains_key(&region_id) {
-                            let opts = split_region.get_opts();
-                            if opts.len() != 3 {
-                                info!("receive invalid split info option!"; "region_id" => region_id);
-                            } else {
-                                let split_info = RatioSplitInfo {
-                                    dim_id: opts[0] as u64,
-                                    ratio: opts[1],
-                                    rw_type: opts[2] as u64,
-                                };
-                                split_maps.insert(region_id, split_info);
-                                info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1]);
-                            }
+                        let opts = split_region.get_opts();
+                        if opts.len() != 3 {
+                            info!("receive invalid split info option!"; "region_id" => region_id);
+                        } else {
+                            let ratio_split_info = RatioSplitInfo {
+                                dim_id: opts[0] as u64,
+                                ratio: opts[1],
+                                rw_type: opts[2] as u64,
+                                create_time: Instant::now(),
+                            };
+                            let mut split_maps = ratio_split_maps.lock().unwrap();
+                            split_maps.insert(region_id, ratio_split_info);
+                            info!("receive ratio split request"; "region_id" => region_id, "split_dimension_id" => opts[0] as u64, "split_ratio" => opts[1], "rw_type" => opts[2] as u64);
                         }
                     } else {
                         if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
@@ -972,8 +992,13 @@ where
                 peer_stat.read_ops += region_info.qps as u64;
                 self.store_stat.store_read_ops += region_info.qps as u64;
             } else {
+                peer_stat.write_bytes += region_info.bytes as u64;
+                peer_stat.write_keys += region_info.keys as u64;
                 peer_stat.write_ops += region_info.qps as u64;
                 self.store_stat.store_write_ops += region_info.qps as u64;
+
+                self.store_stat.engine_total_bytes_write_leader += region_info.bytes as u64;
+                self.store_stat.engine_total_keys_write_leader += region_info.keys as u64;
             }
         }
 
@@ -1155,13 +1180,13 @@ where
                         .or_insert_with(PeerStat::default);
                     let read_bytes_delta = peer_stat.read_bytes - peer_stat.last_read_bytes;
                     let read_keys_delta = peer_stat.read_keys - peer_stat.last_read_keys;
-                    let written_bytes_delta = written_bytes - peer_stat.last_written_bytes;
-                    let written_keys_delta = written_keys - peer_stat.last_written_keys;
+                    let written_bytes_delta = peer_stat.write_bytes - peer_stat.last_written_bytes;
+                    let written_keys_delta = peer_stat.write_keys - peer_stat.last_written_keys;
                     let read_ops_delta = peer_stat.read_ops - peer_stat.last_read_ops;
                     let write_ops_delta = peer_stat.write_ops - peer_stat.last_write_ops;
                     let mut last_report_ts = peer_stat.last_report_ts;
-                    peer_stat.last_written_bytes = written_bytes;
-                    peer_stat.last_written_keys = written_keys;
+                    peer_stat.last_written_bytes = peer_stat.write_bytes;
+                    peer_stat.last_written_keys = peer_stat.write_keys;
                     peer_stat.last_read_bytes = peer_stat.read_bytes;
                     peer_stat.last_read_keys = peer_stat.read_keys;
                     peer_stat.last_read_ops = peer_stat.read_ops;

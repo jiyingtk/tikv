@@ -194,6 +194,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
         let mut async_commit_ts = TimeStamp::zero();
         for m in self.mutations {
             let prev_write_size = txn.write_size();
+            let prev_write_keys = txn.write_keys();
             let mut req_info = RequestInfo::default();
             if let Ok(key) = m.key().to_owned().into_raw() {
                 req_info = build_req_info(&key, &key, false);
@@ -227,7 +228,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
                 }
                 Err(e) => return Err(Error::from(e)),
             }
-            tls_collect_write_req_info(self.ctx.get_region_id(), self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size);    //use correct region_id
+            tls_collect_write_req_info(self.ctx.get_region_id(), self.ctx.get_peer(), req_info, txn.write_size() - prev_write_size, txn.write_keys() - prev_write_keys);
         }
 
         context.statistics.add(&txn.take_statistics());
